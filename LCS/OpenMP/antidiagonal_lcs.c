@@ -26,8 +26,11 @@ ll lcs(unsigned short *DP_matrix, char *str_A, char *str_B, int m, int n, int t)
         /* Il numero di elementi sulla diagonale corrente è il minimo tra j ed (m-i) */
         ll sz = (j < (m - i)) ? j : (m - i);
 
-        #pragma omp parallel shared(i, j, dp, X, Y, sz) // creazione thread
+        #pragma omp parallel shared(i, j, DP_matrix, str_A, str_B, sz) // creazione thread
         {
+
+            //printf("Thread ID %d: riga = %lld, colonna = %lld\n", omp_get_thread_num(), i, j);
+
             #pragma omp for // divido il lavoro tra i thread
             for (k_index = 0; k_index <= sz; ++k_index) {
 
@@ -146,6 +149,8 @@ int main(int argc, char *argv[]) {
             exit(1);
         }
 
+        printf("Number of threads: %d\n", thread_arr[k]);
+
         papi_time_start = PAPI_get_real_usec();
         
         result = lcs(DP_matrix, string_A, string_B, len_a, len_b, thread_arr[k]);
@@ -164,6 +169,7 @@ int main(int argc, char *argv[]) {
         printf("Cache miss L1: %lld\n", countCacheMiss[0]);
         printf("Cache miss L2: %lld\n", countCacheMiss[1]);
         printf("Cache miss L3: %lld\n", countCacheMiss[2]);
+        printf("--------------------------------------------------\n");
 
         free(DP_matrix);
         DP_matrix = NULL;
