@@ -9,8 +9,10 @@
 // Function to calculate the length of the longest common subsequence (LCS)
 unsigned short lcs(unsigned short *DP_matrix, char *A, char *B, int m, int n)
 {
+    unsigned char is_copy_possible = 0; // Flag to check for adjacent duplicates
+
     for (int i = 1; i <= m; i++) {
-       
+
         // Access the current row and previous row in the flattened DP_matrix
         // This avoids a lot of cache misses
         unsigned short *currRow = DP_matrix + i * (n + 1);
@@ -19,15 +21,39 @@ unsigned short lcs(unsigned short *DP_matrix, char *A, char *B, int m, int n)
         // Get the character from string A for the current row only when value of i changes
         char a_i = A[i - 1];
 
+        // Check for adjacent duplicates
+        is_copy_possible = (i >= 2) && (a_i == A[i - 2]);
+
         for (int j = 1; j <= n; j++) {
 
             if (a_i != B[j - 1])
             {
-                currRow[j] = MAX(prevRow[j], currRow[j - 1]);
+                if (!is_copy_possible)
+                {
+                    // If the characters are not equal, take the maximum of the left and top cells
+                    currRow[j] = MAX(prevRow[j], currRow[j - 1]);
+                }
+                else
+                {
+                    // If adjacent duplicate is found, copy the value from the previous row
+                    currRow[j] = prevRow[j];
+                }
             }
             else
             {
-                currRow[j] = prevRow[j - 1] + 1;
+                if(!is_copy_possible)
+                {
+                    // If the characters are equal, take the diagonal value and add 1
+                    currRow[j] = prevRow[j - 1] + 1;
+                }
+                else
+                {
+                    // If adjacent duplicate is found, the first time that the character is equal, copy the value from the previous row
+                    currRow[j] = prevRow[j];
+                }
+
+                // Reset the flag if characters are equal
+                is_copy_possible = 0;
             }
         }
     }
