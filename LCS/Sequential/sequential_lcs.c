@@ -35,6 +35,8 @@ unsigned short lcs(unsigned short *DP_matrix, char *A, char *B, int m, int n)
     return DP_matrix[m * (n + 1) + n];
 }
 
+// prova 
+
 int main(int argc, char *argv[])
 {
     // Check if the input file is provided
