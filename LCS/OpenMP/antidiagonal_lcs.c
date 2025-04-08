@@ -1,12 +1,7 @@
 #include <stdio.h>
 #include <stdlib.h>
-#include <string.h>
-#include <time.h>
 #include <omp.h>
-#include <unistd.h>
 #include <papi.h>
-
-typedef long long ll;
 
 // Macro to access the flattened DP_matrix matrix (on a single line)
 // The matrix is of size (m+1) x (n+1)
@@ -14,42 +9,38 @@ typedef long long ll;
 
 /* Funzione che calcola la LCS usando il metodo “antidiagonale” con OpenMP.
    X ed Y sono le stringhe, m ed n le loro lunghezze, t il numero di thread da usare. */
-ll lcs(unsigned short *DP_matrix, char *str_A, char *str_B, int m, int n, int t) {
+   unsigned short lcs(unsigned short *DP_matrix, char *str_A, char *str_B, int m, int n, int t) {
 
-    omp_set_num_threads((int)t);
-    
-    ll i, j, ii, jj, k_index;
-    
-    /* Calcolo in antidiagonale */
-    for (i = 1, j = 1; j <= n && i <= m; j++) {
+    omp_set_num_threads(t);
+    unsigned short d, k_index, ii, jj;
+    unsigned short start_i, end_i;
+    // Supponiamo che le diagonali abbiano indice d, che va da 2 a (m+n)
+    // Utilizziamo una regione parallela unica per tutto il ciclo.
+    #pragma omp parallel
+    {
+        for (d = 2; d <= m + n; d++) {
+            // Calcolo degli estremi per i in questa diagonale:
+            start_i = (d - n) > 1 ? (d - n) : 1;
+            end_i   = (d - 1 < m ? d - 1 : m);
 
-        /* Il numero di elementi sulla diagonale corrente è il minimo tra j ed (m-i) */
-        ll sz = (j < (m - i)) ? j : (m - i);
+            // Distribuisci le iterazioni di k tra i thread:
+            #pragma omp for schedule(dynamic)
+            for (k_index = 0; k_index <= (end_i - start_i); k_index++) {
+                ii = start_i + k_index; 
+                jj = d - ii; 
 
-        #pragma omp parallel shared(i, j, DP_matrix, str_A, str_B, sz) // creazione thread
-        {
-
-            //printf("Thread ID %d: riga = %lld, colonna = %lld\n", omp_get_thread_num(), i, j);
-
-            #pragma omp for // divido il lavoro tra i thread
-            for (k_index = 0; k_index <= sz; ++k_index) {
-
-                ii = i + k_index; 
-                jj = j - k_index; 
-
-                if (str_A[ii - 1] == str_B[jj - 1]) // confronto i caratteri
+                if (str_A[ii - 1] == str_B[jj - 1])
                     DP_MATRIX(ii, jj) = DP_MATRIX(ii - 1, jj - 1) + 1;
                 else
-                    DP_MATRIX(ii, jj) = (DP_MATRIX(ii - 1, jj) > DP_MATRIX(ii, jj - 1)) ? DP_MATRIX(ii - 1, jj) : DP_MATRIX(ii, jj - 1);
+                    DP_MATRIX(ii, jj) = (DP_MATRIX(ii - 1, jj) > DP_MATRIX(ii, jj - 1)) ?
+                                         DP_MATRIX(ii - 1, jj) : DP_MATRIX(ii, jj - 1);
             }
-            #pragma omp barrier
+            // Barriera implicita alla fine del ciclo #pragma omp for garantisce che tutti i thread
+            // abbiano finito la diagonale corrente prima di passare alla successiva.
+            // Non serve aggiungere una #pragma omp barrier qui.
         }
-        if (j >= n) {
-            j = n - 1;
-            i++;
-        }
-    }
-    
+    } // Fine della regione parallela
+
     return DP_MATRIX(m, n);
 }
 
@@ -134,7 +125,7 @@ int main(int argc, char *argv[]) {
     /* Array di thread da utilizzare per ciascuna misurazione */
     int thread_arr[] = {1, 2, 4, 6, 8, 10, 12, 16, 20, 32, 64};
     int thread_arr_size = sizeof(thread_arr) / sizeof(thread_arr[0]);
-    ll result;
+    unsigned short result;
     int k;
     
     for (k = 0; k < thread_arr_size; k++) {
