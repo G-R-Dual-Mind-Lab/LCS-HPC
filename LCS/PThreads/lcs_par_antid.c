@@ -116,8 +116,8 @@ int main(int argc, char *argv[]) {
     printf("String A length: %d\nString B lenght: %d\n", len_A, len_B);
 
     // Allocate memory for strings and unique characters
-    str_A = (char *)malloc((len_A+1) * sizeof(char));
-    str_B = (char *)malloc((len_B+1) * sizeof(char));
+    str_A = malloc((len_A+1) * sizeof(char));
+    str_B = malloc((len_B+1) * sizeof(char));
 
     DP_matrix = malloc((len_A + 1) * sizeof(int *));
     if (DP_matrix == NULL) {

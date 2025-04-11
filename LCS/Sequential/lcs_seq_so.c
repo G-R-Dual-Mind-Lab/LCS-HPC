@@ -130,8 +130,8 @@ int main(int argc, char *argv[])
     printf("String A length: %u\nString B length: %u\n", len_a, len_b);
 
     // Allocate memory for strings and unique characters
-    char *string_A = (char *)malloc((len_a + 1) * sizeof(char));
-    char *string_B = (char *)malloc((len_b + 1) * sizeof(char));
+    char *string_A = malloc((len_a + 1) * sizeof(char));
+    char *string_B = malloc((len_b + 1) * sizeof(char));
 
     if (string_A == NULL || string_B == NULL) {
         printf("Error: Memory allocation failed for strings.\n");
@@ -156,7 +156,7 @@ int main(int argc, char *argv[])
 
     // Allocate memory for two rows DP_matrix matrix
     // In this way, we optimise the space complexity of the algorithm from O(n*m) to O(2*m)
-    unsigned int *two_rows_dp_matrix = (int *)calloc((2) * (len_b + 1), sizeof(int));
+    unsigned int *two_rows_dp_matrix = calloc((2) * (len_b + 1), sizeof(int));
 
     // Initialize the PAPI library
     if (PAPI_library_init(PAPI_VER_CURRENT) != PAPI_VER_CURRENT) {
