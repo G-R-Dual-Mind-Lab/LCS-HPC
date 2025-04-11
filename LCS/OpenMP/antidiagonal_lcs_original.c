@@ -2,55 +2,72 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
-#include <omp.h>
 #include <unistd.h>
 #include <papi.h>
+#include <pthread.h>
+
+#define NUM_THREADS 8
 
 typedef long long ll;
 
 // Macro to access the flattened DP_matrix matrix (on a single line)
-// The matrix is of size (m+1) x (n+1)
-#define DP_MATRIX(i,j) DP_matrix[(i)*(n+1) + (j)]
+// The matrix is of size (len_A+1) x (len_B+1)
+#define DP_MATRIX(i,j) DP_matrix[(i) * (len_B + 1) + (j)]
 
 /* Funzione che calcola la LCS usando il metodo “antidiagonale” con OpenMP.
    X ed Y sono le stringhe, m ed n le loro lunghezze, t il numero di thread da usare. */
-ll lcs(unsigned short *DP_matrix, char *str_A, char *str_B, int m, int n, int t) {
+unsigned short lcs(unsigned short *DP_matrix, char *str_A, char *str_B, unsigned short len_A, unsigned short len_B, unsigned short t) {
 
     omp_set_num_threads((int)t);
     
-    ll i, j, ii, jj, k_index;
-    
-    /* Calcolo in antidiagonale */
-    for (i = 1, j = 1; j <= n && i <= m; j++) {
+    unsigned short ii, jj, i, j, k_index,sz;
 
-        /* Il numero di elementi sulla diagonale corrente è il minimo tra j ed (m-i) */
-        ll sz = (j < (m - i)) ? j : (m - i);
+    /* Il numero di elementi sulla diagonale corrente è il minimo tra j ed (m-i) */
+    sz = (j < (len_A - i)) ? j : (len_A - i);
 
-        #pragma omp parallel shared(i, j, DP_matrix, str_A, str_B, sz) // creazione thread
+    // anti-diagonali = n + m - 1
+
+    #pragma omp parallel shared(DP_matrix, str_A, str_B)
+    {
+        #pragma omp single // creazione thread
         {
-
-            //printf("Thread ID %d: riga = %lld, colonna = %lld\n", omp_get_thread_num(), i, j);
-
-            #pragma omp for // divido il lavoro tra i thread
-            for (k_index = 0; k_index <= sz; ++k_index) {
-
-                ii = i + k_index; 
-                jj = j - k_index; 
-
-                if (str_A[ii - 1] == str_B[jj - 1]) // confronto i caratteri
-                    DP_MATRIX(ii, jj) = DP_MATRIX(ii - 1, jj - 1) + 1;
-                else
-                    DP_MATRIX(ii, jj) = (DP_MATRIX(ii - 1, jj) > DP_MATRIX(ii, jj - 1)) ? DP_MATRIX(ii - 1, jj) : DP_MATRIX(ii, jj - 1);
-            }
-            #pragma omp barrier
+            
         }
-        if (j >= n) {
-            j = n - 1;
-            i++;
+
+        // 
+
+        #pragma omp barrier // sincronizzazione dei thread
+    }
+
+    
+    #pragma omp parallel shared(i, j, DP_matrix, str_A, str_B, sz) // creazione thread
+    {
+        /* Calcolo in antidiagonale */
+        for (i = 1, j = 1; j <= len_B && i <= len_A; j++) {
+
+            /* Il numero di elementi sulla diagonale corrente è il minimo tra j ed (m-i) */
+            sz = (j < (len_A - i)) ? j : (len_A - i);
+
+                #pragma omp for // divido il lavoro tra i thread
+                for (k_index = 0; k_index <= sz; ++k_index) {
+
+                    ii = i + k_index; 
+                    jj = j - k_index; 
+
+                    if (str_A[ii - 1] == str_B[jj - 1]) // confronto i caratteri
+                        DP_MATRIX(ii, jj) = DP_MATRIX(ii - 1, jj - 1) + 1;
+                    else
+                        DP_MATRIX(ii, jj) = (DP_MATRIX(ii - 1, jj) > DP_MATRIX(ii, jj - 1)) ? DP_MATRIX(ii - 1, jj) : DP_MATRIX(ii, jj - 1);
+                }
+                #pragma omp barrier
+            //}
+            if (j >= len_B) {
+                j = len_B - 1;
+                i++;
+            }
         }
     }
-    
-    return DP_MATRIX(m, n);
+    return DP_MATRIX(len_A, len_B);
 }
 
 int main(int argc, char *argv[]) {
@@ -68,13 +85,13 @@ int main(int argc, char *argv[]) {
     }
     
     // Declare variables
-    int len_a, len_b, len_c; // Lengths of strings A, B, and C
+    unsigned short len_a, len_b, len_c; // Lengths of strings A, B, and C
     long long papi_time_start, papi_time_stop; // Initialize PAPI time variables
     int EventSet = PAPI_NULL;
     long long countCacheMiss[3]; // Array to store cache miss counts
 
     // Initialize strings lengths
-    fscanf(fp, "%d %d %d", &len_a, &len_b, &len_c);
+    fscanf(fp, "%hu %hu %hu", &len_a, &len_b, &len_c);
     if (len_a <= 0 || len_a >= USHRT_MAX || len_b <= 0 || len_b >= USHRT_MAX || len_c <= 0) {
         printf("Error: Invalid string lengths. Please check the input file.\n");
         fclose(fp);
@@ -82,7 +99,7 @@ int main(int argc, char *argv[]) {
     }
 
     // Print string lengths
-    printf("String A length: %d\nString B lenght: %d\nAlphabet lenght: %d\n", len_a, len_b, len_c);
+    printf("String A length: %hu\nString B lenght: %hu\nAlphabet lenght: %hu\n", len_a, len_b, len_c);
 
     // Allocate memory for strings and unique characters
     char *string_A = (char *)malloc((len_a+1) * sizeof(char));
@@ -132,16 +149,22 @@ int main(int argc, char *argv[]) {
     }
     
     /* Array di thread da utilizzare per ciascuna misurazione */
-    int thread_arr[] = {1, 2, 4, 6, 8, 10, 12, 16, 20, 32, 64};
-    int thread_arr_size = sizeof(thread_arr) / sizeof(thread_arr[0]);
-    ll result;
-    int k;
+    unsigned short thread_arr[] = {1, 4, 8, 16, 32, 64};
+    unsigned short thread_arr_size = sizeof(thread_arr) / sizeof(thread_arr[0]);
+    unsigned short result;
+    unsigned short k;
+
+    unsigned short *DP_matrix = NULL; // Initialize DP_matrix pointer
     
     for (k = 0; k < thread_arr_size; k++) {
         
-        // Allocate memory for DP_matrix matrix
-        // DP_matrix matrix is of size (len_a+1) x (len_b+1)
-        unsigned short *DP_matrix = (unsigned short *)calloc((len_a + 1) * (len_b + 1), sizeof(unsigned short));
+        // Allocate memory for DP_matrix matrix, DP_matrix matrix is of size (len_a+1) x (len_b+1)
+        DP_matrix = (unsigned short *)calloc((len_a + 1) * (len_b + 1), sizeof(unsigned short));
+
+        if (DP_matrix == NULL) {
+            fprintf(stderr, "Error: Memory allocation for DP_matrix failed.\n");
+            exit(1);
+        }
 
         // Start the counting of events
         if (PAPI_start(EventSet) != PAPI_OK){
@@ -149,7 +172,7 @@ int main(int argc, char *argv[]) {
             exit(1);
         }
 
-        printf("Number of threads: %d\n", thread_arr[k]);
+        printf("Number of threads: %hu\n", thread_arr[k]);
 
         papi_time_start = PAPI_get_real_usec();
         
@@ -163,7 +186,7 @@ int main(int argc, char *argv[]) {
             exit(1);
         }
 
-        printf("Length of LCS is %lld\n", result);
+        printf("Length of LCS is %hu\n", result);
         printf("Total Execution Time: %lld μs\n", papi_time_stop - papi_time_start);
         
         printf("Cache miss L1: %lld\n", countCacheMiss[0]);
@@ -172,8 +195,9 @@ int main(int argc, char *argv[]) {
         printf("--------------------------------------------------\n");
 
         free(DP_matrix);
-        DP_matrix = NULL;
     }
+
+    DP_matrix = NULL;
     
     /* Pulizia degli EventSet e della libreria PAPI */
     PAPI_cleanup_eventset(EventSet);

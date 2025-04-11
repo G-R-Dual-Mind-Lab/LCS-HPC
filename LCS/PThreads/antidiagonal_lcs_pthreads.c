@@ -7,13 +7,13 @@
 #define NUM_THREADS 16 // Default number of threads
 
 // Global variables
-int len_A, len_B, *DP_matrix;
+int len_A, len_B, **DP_matrix;
 char *str_A, *str_B;
 pthread_barrier_t barrier;
 
 
 // Macro to access the flattened DP_matrix matrix (on a single line)
-#define DP_MATRIX(i, j, n, DP_matrix) DP_matrix[(i) * ((n) + 1) + (j)]
+#define DP_MATRIX(i, j, DP_matrix) DP_matrix[i][j]
 
 // Function executed by each thread.
 // Each thread processes (in parallel) the assigned elements of each antidiagonal.
@@ -62,16 +62,16 @@ void *lcs_thread_func(void *thread_id) {
             if (str_A[i - 1] == str_B[j - 1])
             {
                 // If the characters match, take the diagonal value and add 1.
-                value = DP_MATRIX(i - 1, j - 1, len_B, DP_matrix) + 1;
+                value = DP_MATRIX(i - 1, j - 1, DP_matrix) + 1;
             }
             else
             {
                 // If the characters do not match, take the maximum of the left and top cells.
-                int top = DP_MATRIX(i - 1, j, len_B, DP_matrix);
-                int left = DP_MATRIX(i, j - 1, len_B, DP_matrix);
+                int top = DP_MATRIX(i - 1, j, DP_matrix);
+                int left = DP_MATRIX(i, j - 1, DP_matrix);
                 value = (top > left) ? top : left;
             }
-            DP_MATRIX(i, j, len_B, DP_matrix) = value;
+            DP_MATRIX(i, j, DP_matrix) = value;
         }
         // Sincronizza tutti i thread: attendi il completamento dell'antidiagonale.
         pthread_barrier_wait(&barrier);
@@ -106,7 +106,7 @@ int main(int argc, char *argv[]) {
 
     // Initialize strings lengths
     fscanf(fp, "%d %d", &len_A, &len_B);
-    if (len_A <= 0 || len_A >= USHRT_MAX || len_B <= 0 || len_B >= USHRT_MAX) {
+    if (len_A <= 0 || len_A >= INT_MAX || len_B <= 0 || len_B >= INT_MAX) {
         printf("Error: Invalid string lengths. Please check the input file.\n");
         fclose(fp);
         return 1;
@@ -119,14 +119,18 @@ int main(int argc, char *argv[]) {
     str_A = (char *)malloc((len_A+1) * sizeof(char));
     str_B = (char *)malloc((len_B+1) * sizeof(char));
 
-    // Allocate memory for DP_matrix matrix
-    // DP_matrix matrix is of size (len_a+1) x (len_b+1)
-    DP_matrix = (int *)calloc((len_A + 1) * (len_B + 1), sizeof(int));
+    DP_matrix = malloc((len_A + 1) * sizeof(int *));
     if (DP_matrix == NULL) {
-        printf("Error: Memory allocation failed for DP_matrix!\n");
-        exit(EXIT_FAILURE); // Esci dal programma se l'allocazione fallisce
+        fprintf(stderr, "Errore: allocazione della matrice delle righe fallita!\n");
+        exit(EXIT_FAILURE);
     }
-
+    for (int i = 0; i <= len_A; i++) {
+        DP_matrix[i] = calloc(len_B + 1, sizeof(int));
+        if (DP_matrix[i] == NULL) {
+            fprintf(stderr, "Errore: allocazione della riga %d fallita!\n", i);
+            exit(EXIT_FAILURE);
+        }
+    }
 
     fscanf(fp, "%s %s", str_A, str_B);
 
@@ -209,7 +213,7 @@ int main(int argc, char *argv[]) {
         exit(1);
     }
 
-    printf("Length of LCS is: %d\n", DP_MATRIX(len_A, len_B, len_B, DP_matrix));
+    printf("Length of LCS is: %d\n", DP_MATRIX(len_A, len_B, DP_matrix));
 
     printf("Number of threads: %d\n", NUM_THREADS);
 
@@ -223,6 +227,9 @@ int main(int argc, char *argv[]) {
     pthread_barrier_destroy(&barrier);
     free(threads);
 
+    for (int i = 0; i <= len_A; i++) {
+        free(DP_matrix[i]);
+    }
     free(DP_matrix);
     
     /* Pulizia degli EventSet e della libreria PAPI */
