@@ -94,7 +94,7 @@ int lcs_length = 0;                       /* Lunghezza della LCS (longest common
 int rank;                                   /* Current process identifier */
 char hn[HOST_BUFF];                         /* Hostname of the machine */
 char *string_A, *string_B;                  /* Pointers to the two strings and alphabet */
-int string_lengths[3];                      /* Array to store the lengths of the two strings */
+int string_lengths[2];                      /* Array to store the lengths of the two strings */
 int offset_A, offset_B;
 int max_antidiagonal_length;                /* Lunghezza in blocchi della massima antidiagonale */
 int num_blocks_rows, num_blocks_cols;       /* Number of blocks in rows and columns */
