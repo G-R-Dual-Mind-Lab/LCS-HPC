@@ -24,6 +24,8 @@ typedef struct {
     int task_id[2];                         // ID univoco del task
     int start_index_sub_a;                  // Inidce iniziale della porzione di stringa A da considerare
     int start_index_sub_b;                  // Inidce iniziale della porzione di stringa B da considerare
+    int  block_h;          // new: number of rows in *this* tile
+    int  block_w;          // new: number of cols in *this* tile
     int top_row[TILE_DIM];                  // Riga superiore (bordo superiore)
     int left_col[TILE_DIM];                 // Colonna sinistra (bordo sinistro)
     int angle;                              // Angolo (diagonale) del task
@@ -50,6 +52,8 @@ typedef struct{
     task_queue[task_counter].task_id[1] = task.task_id[1]; \
     task_queue[task_counter].start_index_sub_a = task.start_index_sub_a; \
     task_queue[task_counter].start_index_sub_b = task.start_index_sub_b; \
+    task_queue[task_counter].block_h        = task.block_h;      \
+    task_queue[task_counter].block_w        = task.block_w;      \
     __atomic_thread_fence(__ATOMIC_RELEASE); \
     task_queue[task_counter].initialized = 1; \
 }
@@ -89,7 +93,7 @@ int lcs_length = 0;                       /* Lunghezza della LCS (longest common
 // AREA DATI GLOBALE: Variabili globali master + worker
 int rank;                                   /* Current process identifier */
 char hn[HOST_BUFF];                         /* Hostname of the machine */
-char *string_A, *string_B, *alphabet;       /* Pointers to the two strings and alphabet */
+char *string_A, *string_B;                  /* Pointers to the two strings and alphabet */
 int string_lengths[3];                      /* Array to store the lengths of the two strings */
 int offset_A, offset_B;
 int max_antidiagonal_length;                /* Lunghezza in blocchi della massima antidiagonale */
@@ -197,17 +201,16 @@ int main(int argc, char *argv[])
             exit(-1);
         }
 
-        fscanf(fp, "%d %d %d", &string_lengths[0], &string_lengths[1], &string_lengths[2]);
+        fscanf(fp, "%d %d", &string_lengths[0], &string_lengths[1]);
 
         printf("(MASTER %d on %s) (thread %lu) Sequence lengths: %d %d\n", rank, hn, (unsigned long)pthread_self(), string_lengths[0], string_lengths[1]);
 
         // alloco memoria per le due stinghe
         string_A = malloc((string_lengths[0] + 1) * sizeof(char));
         string_B = malloc((string_lengths[1] + 1) * sizeof(char));
-        alphabet = malloc((string_lengths[2] + 1) * sizeof(char));
 
         // carico le stringhe in memoria
-        fscanf(fp, "%s %s %s", string_A, string_B, alphabet);
+        fscanf(fp, "%s %s", string_A, string_B);
 
         //printf("(MASTER %d on %s) (thread %lu) Sequences read.\n", rank, hn, (unsigned long)pthread_self());
 
@@ -218,8 +221,8 @@ int main(int argc, char *argv[])
         time_start = PAPI_get_real_usec(); // inizio misurazione tempo
 
         // ******************************************** INIZIO FASE 2: Tiling ********************************************
-        num_blocks_rows = string_lengths[0] / TILE_DIM;  // numero di blocchi verticali (sulle righe della matrice)
-        num_blocks_cols = string_lengths[1]/ TILE_DIM;  // numero di blocchi orizzontali (sulle colonne)
+        num_blocks_rows = (string_lengths[0] + TILE_DIM - 1) / TILE_DIM;  // numero di blocchi verticali (sulle righe della matrice)
+        num_blocks_cols = (string_lengths[1] + TILE_DIM - 1) / TILE_DIM;  // numero di blocchi orizzontali (sulle colonne)
         num_antidiagonals = num_blocks_rows + num_blocks_cols - 1;  // il numero totale di antidiagonali è dato da blocchi_righe + blocchi_colonne - 1
         num_blocks = num_blocks_rows * num_blocks_cols; // numero totale di blocchi (sulle righe e colonne della matrice)
         printf("(MASTER %d on %s) (thread %lu) Terminato il tiling:\n- numero blocchi per ogni riga: %d;\n- numero blocchi per ogni colonna: %d;\n- numero antidiagonali: %d;\n- numero totale di blocchi: %d\n", rank, hn, (unsigned long)pthread_self(), num_blocks_rows, num_blocks_cols, num_antidiagonals, num_blocks);
@@ -236,7 +239,6 @@ int main(int argc, char *argv[])
         // Invio le due sequenze e l'alfabeto ai worker
         MPI_Bcast(string_A, string_lengths[0] + 1, MPI_CHAR, 0, MPI_COMM_WORLD);
         MPI_Bcast(string_B, string_lengths[1] + 1, MPI_CHAR, 0, MPI_COMM_WORLD);
-        MPI_Bcast(alphabet, string_lengths[2] + 1, MPI_CHAR, 0, MPI_COMM_WORLD);
         printf("(MASTER %d on %s) (thread %lu) Ho inviato le stringhe e l'alfabeto.\n", rank, hn, (unsigned long)pthread_self());
 
         //MPI_Barrier(MPI_COMM_WORLD); // Sincronizzazione tra master e worker
@@ -269,15 +271,14 @@ int main(int argc, char *argv[])
         // libero memoria allocata su heap (esegue questo codice solo il main thread del processo master)
  
     } else {    // se sei un worker (rank > 0)
-
+        
         // 1) Ricevo le lunghezze e poi alloco i buffer per le stringhe
         MPI_Bcast(string_lengths, 3, MPI_INT, 0, MPI_COMM_WORLD);
     
         // Alloco memoria per le due stringhe e l'alfabeto
         string_A = malloc((string_lengths[0] + 1) * sizeof(char));
         string_B = malloc((string_lengths[1] + 1) * sizeof(char));
-        alphabet = malloc((string_lengths[2] + 1) * sizeof(char));
-        if (!string_A || !string_B || !alphabet) {
+        if (!string_A || !string_B) {
             perror("alloc string buffers");
             exit(EXIT_FAILURE);
         }
@@ -285,11 +286,9 @@ int main(int argc, char *argv[])
         // 2) Ricevo effettivamente le stringhe
         MPI_Bcast(string_A, string_lengths[0] + 1, MPI_CHAR, 0, MPI_COMM_WORLD);
         MPI_Bcast(string_B, string_lengths[1] + 1, MPI_CHAR, 0, MPI_COMM_WORLD);
-        MPI_Bcast(alphabet, string_lengths[2] + 1, MPI_CHAR, 0, MPI_COMM_WORLD);
 
         // 2) calcolo quanti sotto‑blocchi occorrono per coprire TILE_DIM
         NB = (TILE_DIM + INNER_TILE_DIM - 1) / INNER_TILE_DIM; // numero blocchi per dimensione
-
     
         // 3) Alloca DP_matrix
         /*DP_matrix = malloc((TILE_DIM + 1) * sizeof(int *));
@@ -340,7 +339,6 @@ int main(int argc, char *argv[])
 
     free(string_A);
     free(string_B);
-    free(alphabet);
    
     // Stop the count (il sequente codice è eseguito da tutti i processi MPI)
     if ((rc = PAPI_stop(event_set, &num_cache_miss)) != PAPI_OK)
@@ -381,6 +379,9 @@ void *task_producer(void *args) { // funzione di thread
             task.task_id[0] = i; task.task_id[1] = j; // task_id è un array di due interi (i, j) che rappresentano la posizione del blocco nella matrice
             task.start_index_sub_a = i * TILE_DIM; // Indice iniziale della porzione di stringa A da considerare
             task.start_index_sub_b = j * TILE_DIM; // Indice iniziale della porzione di stringa B da considerare
+            // how many rows/cols this tile really has:
+            task.block_h = MIN( TILE_DIM, string_lengths[0] - task.start_index_sub_a );
+            task.block_w = MIN( TILE_DIM, string_lengths[1] - task.start_index_sub_b );
             INITIALIZE_TASK(task, task_counter); // Ensure task_counter is properly defined in the surrounding scope
             task_counter++; // Incrementa il contatore
         }
@@ -404,7 +405,6 @@ void *send_sequences(void *args) { // funzione di thread
     // Invio le due sequenze e l'alfabeto ai worker
     MPI_Bcast(string_A, string_lengths[0] + 1, MPI_CHAR, 0, MPI_COMM_WORLD);
     MPI_Bcast(string_B, string_lengths[1] + 1, MPI_CHAR, 0, MPI_COMM_WORLD);
-    MPI_Bcast(alphabet, string_lengths[2] + 1, MPI_CHAR, 0, MPI_COMM_WORLD);
 
     pthread_exit(NULL); // termino esplicitamente il thread corrente
 }
@@ -525,7 +525,9 @@ void *task_sender(void *args) { // funzione di thread
             
             index_right_down = block_index(i + 1, j + 1, num_blocks_rows, num_blocks_cols);
 
-            task_queue[index_right_down].angle = result.bottom_row[TILE_DIM - 1]; // inietto dipendenza nel task
+            int parent_w = MIN(TILE_DIM, string_lengths[1] - j * TILE_DIM);
+
+            task_queue[index_right_down].angle = result.bottom_row[parent_w - 1];
             task_queue[index_right_down].angle_ready = 1; // setto il flag a 1 (pronta)
 
             if(task_queue[index_right_down].left_col_ready && task_queue[index_right_down].top_row_ready) {
@@ -543,7 +545,8 @@ void *task_sender(void *args) { // funzione di thread
                 }
             }
         } else if (j == num_blocks_cols - 1 && i == num_blocks_rows - 1) {
-            lcs_length = result.bottom_row[TILE_DIM - 1]; // salvo la lunghezza della LCS
+            int W_last = string_lengths[1] - j * TILE_DIM;
+            lcs_length = result.bottom_row[W_last - 1];
             stop_sender = 1;
         }
         
@@ -599,15 +602,6 @@ int block_index(int x, int y, int M, int N) {
     return before + offset;
 }
 
-// seguono funzioni di DEBUG
-void carico_fittizio(int iterazioni) {
-    volatile double dummy = 0.0; // volatile per evitare ottimizzazione
-    for (int i = 0; i < iterazioni; i++) {
-        dummy += i * 0.0001;
-        dummy = dummy / 1.000001;
-    }
-}
-
 // DP_matrix è int** di dimensione (TILE_DIM+1)x(TILE_DIM+1), globale al worker
 // string_A, string_B sono i vettori di caratteri globali
 // offset_A, offset_B sono già impostati
@@ -622,57 +616,56 @@ void lcs_block_wavefront(Task *t) {
     int i, j;
 
     // 1) init bordi della tile globale DP_matrix[0..TILE_DIM][0..TILE_DIM]
-    DP_MATRIX(0, 0) = t->angle;
-    for (int k = 1; k <= TILE_DIM; ++k) {
+    int H = t->block_h, W = t->block_w;
+    DP_MATRIX(0,0) = t->angle;
+    for (int k = 1; k <= W; ++k)
         DP_MATRIX(0, k) = t->top_row[k-1];
+    for (int k = 1; k <= H; ++k)
         DP_MATRIX(k, 0) = t->left_col[k-1];
-    }
 
-    // 3) antidiagonali di blocchi
-    for (int d = 0; d < 2*NB - 1; ++d) {
-        int bi_min = (d >= NB - 1) ? (d - (NB - 1)) : 0;
-        int bi_max = (d <  NB)      ? d            : (NB - 1);
+    // 3) antidiagonali di sotto‑blocchi **solo** fino a H×W
+    int NB_h     = (H + INNER_TILE_DIM - 1) / INNER_TILE_DIM;
+    int NB_w     = (W + INNER_TILE_DIM - 1) / INNER_TILE_DIM;
+    int numSdag  = NB_h + NB_w - 1;
 
-        #pragma omp parallel for schedule(dynamic,1) private(i0, i1, j0, j1, up, left, gi, gj, i, j, bi, bj)
-        for (bi = bi_min; bi <= bi_max; ++bi) {
-            bj = d - bi;
+    for (int d = 0; d < numSdag; ++d) {
+        int bi_min = MAX(0, d - (NB_w - 1));
+        int bi_max = MIN(d, NB_h - 1);
 
-            // coordinate globali della sotto‑tile
-            i0 = bi * INNER_TILE_DIM + 1;
-            j0 = bj * INNER_TILE_DIM + 1;
-            i1 = (bi+1)*INNER_TILE_DIM < TILE_DIM 
-                ? (bi+1)*INNER_TILE_DIM 
-                : TILE_DIM;
-            j1 = (bj+1)*INNER_TILE_DIM < TILE_DIM 
-                ? (bj+1)*INNER_TILE_DIM 
-                : TILE_DIM;
+        #pragma omp parallel for schedule(dynamic,1) private(i0,i1,j0,j1,up,left,gi,gj,i,j,bi)
+        for (int bi = bi_min; bi <= bi_max; ++bi) {
+            int bj = d - bi;
+            // coordinate locali in [1..H]×[1..W]
+            int i0 = bi * INNER_TILE_DIM + 1;
+            int j0 = bj * INNER_TILE_DIM + 1;
+            int i1 = MIN((bi + 1) * INNER_TILE_DIM, H);
+            int j1 = MIN((bj + 1) * INNER_TILE_DIM, W);
 
-            // calcolo delle celle della sotto‑tile
-            for (i = i0; i <= i1; ++i) {
-                for (j = j0; j <= j1; ++j) {
-                    up   = DP_MATRIX((i-1), j);
-                    left = DP_MATRIX(i, (j-1));
-                    gi = t->start_index_sub_a + (i - 1);
-                    gj = t->start_index_sub_b + (j - 1);
+            for (int i = i0; i <= i1; ++i) {
+                for (int j = j0; j <= j1; ++j) {
+                    up   = DP_MATRIX(i-1, j);
+                    left = DP_MATRIX(i, j-1);
+                    gi   = t->start_index_sub_a + i - 1;
+                    gj   = t->start_index_sub_b + j - 1;
                     DP_MATRIX(i, j) = (string_A[gi] == string_B[gj])
-                        ? DP_MATRIX((i-1), (j-1)) + 1
-                        : (up > left ? up : left);
+                        ? DP_MATRIX(i-1, j-1) + 1
+                        : MAX(up, left);
                 }
             }
-        }
-        // fine implicit barrier
+       }
+        // implicit barrier di OpenMP
     }
 
     // 4) il thread master MPI prepara e invia il risultato del tile
     Result res;
     res.task_id[0] = t->task_id[0];
     res.task_id[1] = t->task_id[1];
-    // colonna destra
-    for (int i = 1; i <= TILE_DIM; ++i)
-        res.right_col[i-1] = DP_MATRIX(i, TILE_DIM);
-    // riga inferiore
-    for (int j = 1; j <= TILE_DIM; ++j)
-        res.bottom_row[j-1] = DP_MATRIX(TILE_DIM, j);
 
+    // send only the actual borders of this tile
+    for (int i = 1; i <= H; ++i)
+        res.right_col[i-1] = DP_MATRIX(i, W);
+    for (int j = 1; j <= W; ++j)
+        res.bottom_row[j-1] = DP_MATRIX(H, j);
+    
     MPI_Send(&res, sizeof(res), MPI_BYTE, 0, TAG_RESULT, MPI_COMM_WORLD);
 }
