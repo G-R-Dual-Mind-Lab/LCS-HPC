@@ -12,8 +12,8 @@ char *str_A, *str_B;
 pthread_barrier_t barrier;
 
 
-// Macro to access the flattened DP_matrix matrix (on a single line)
 #define DP_MATRIX(i, j, DP_matrix) DP_matrix[i][j]
+
 
 // Function executed by each thread.
 // Each thread processes (in parallel) the assigned elements of each antidiagonal.

@@ -54,8 +54,8 @@ void *lcs_thread_func(void *arg) {
             count_prev2 = (i_max_prev2 - A_prev2 + 1 > 0) ? (i_max_prev2 - A_prev2 + 1) : 0;
         }
 
-        chunk = count / NUM_THREADS;
-        rem = count % NUM_THREADS;
+        chunk = count / NUM_WORKER_THREADS;
+        rem = count % NUM_WORKER_THREADS;
         if (id < rem) {
             start = id * (chunk + 1);
             end = start + (chunk + 1);
@@ -168,7 +168,7 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    if(pthread_barrier_init(&barrier, NULL, NUM_THREADS) != 0){
+    if(pthread_barrier_init(&barrier, NULL, NUM_WORKER_THREADS) != 0){
         fprintf(stderr, "Error initializing barrier.\n");
         return 1;
     }
@@ -179,9 +179,9 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    pthread_t *threads = malloc(NUM_THREADS * sizeof(pthread_t));
-    int thread_ids[NUM_THREADS];
-    for (int i = 0; i < NUM_THREADS; i++){
+    pthread_t *threads = malloc(NUM_WORKER_THREADS * sizeof(pthread_t));
+    int thread_ids[NUM_WORKER_THREADS];
+    for (int i = 0; i < NUM_WORKER_THREADS; i++){
         thread_ids[i] = i;
         if(pthread_create(&threads[i], NULL, lcs_thread_func, &thread_ids[i]) != 0){
 
@@ -193,7 +193,7 @@ int main(int argc, char *argv[]) {
 
     long long papi_time_start = PAPI_get_real_usec();
 
-    for (int i = 0; i < NUM_THREADS; i++){
+    for (int i = 0; i < NUM_WORKER_THREADS; i++){
         pthread_join(threads[i], NULL);
     }
 
@@ -206,7 +206,7 @@ int main(int argc, char *argv[]) {
     int LCS_length = diag_prev1[k];
 
     printf("Length of LCS is: %d\n", LCS_length);
-    printf("Number of threads: %d\n", NUM_THREADS);
+    printf("Number of threads: %d\n", NUM_WORKER_THREADS);
     printf("Total Execution Time: %lld μs\n", papi_time_stop - papi_time_start);
 
     pthread_barrier_destroy(&barrier);

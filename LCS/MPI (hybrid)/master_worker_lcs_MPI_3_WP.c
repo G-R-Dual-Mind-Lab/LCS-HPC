@@ -7,8 +7,8 @@
 #include <time.h>
 #include "omp.h"
 
-#define NUM_THREADS 16                      // Numero di thread
-#define TILE_DIM 1000                        // Dimensione della tile (blocco)
+#define NUM_WORKER_THREADS 8                // Numero di thread
+#define TILE_DIM 8125                        // Dimensione della tile (blocco)
 #define HOST_BUFF 256                       // Dimensione del buffer per il nome host
 #define TAG_TASK 0                          // Tag dei messaggi di tipo "invio task"
 #define TAG_RESULT 1                        // Tag dei messaggi di tipo "invio task"
@@ -43,6 +43,7 @@ typedef struct{
     int bottom_row[TILE_DIM];              // Riga inferiore (bordo inferiore)
 } Result;
 
+// MACRO
 #define INITIALIZE_TASK(task, task_counter) { \
     task_queue[task_counter].task_id[0] = task.task_id[0]; \
     task_queue[task_counter].task_id[1] = task.task_id[1]; \
@@ -51,10 +52,9 @@ typedef struct{
     __atomic_thread_fence(__ATOMIC_RELEASE); \
     task_queue[task_counter].initialized = 1; \
 }
-
-// Funzioni inline per max e min
 #define MAX(a, b) ((a) > (b) ? (a) : (b))
 #define MIN(a, b) ((a) < (b) ? (a) : (b))
+#define DP_MATRIX(i, j, DP_matrix) DP_matrix[i][j]
 
 /* Seguono i prototipi di funzione */
 void handle_PAPI_error(int, char*);
@@ -67,19 +67,16 @@ void *task_producer(void *args);
 void *task_sender(void *args);
 void *pending_task_sender(void *args);
 void *send_sequences(void *args);
+void *lcs_thread_func(void *thread_id);
 
 int num_processes;                          /* Number of processes in MPI_COMM_WORLD */
 
-// Variabili globali processo master
+// AREA DATI GLOBALE: Variabili globali processo master
 Task *task_queue;                           // Coda dei task (da inviare ai worker)
 int finished_generating;                    /* Flag per indicare se il master ha finito di generare task */
-int num_blocks_rows, num_blocks_cols;       /* Number of blocks in rows and columns */
 int num_blocks;                             /* Number of blocks in the matrix (after tailing) */
 int num_antidiagonals;                      /* Numero totale di antidiagonali */
-int string_lengths[3];                      /* Array to store the lengths of the two strings */
-char *string_A, *string_B, *alphabet;       /* Pointers to the two strings and alphabet */
 int *pending_task_index;                    /* Indice del task non inizializzato (da inviare al worker) */
-int max_antidiagonal_length;                /* Lunghezza in blocchi della massima antidiagonale */
 int rank_worker;                            /* Rank del worker a cui devo inviare il messaggio */
 pthread_mutex_t rank_worker_mutex;          /* Mutex per proteggere l'accesso alla variabile rank_worker */
 int max_rank_worker;                        /* Massimo rank tra i worker a cui posso inviare un messaggio */
@@ -87,9 +84,22 @@ char stop_pending_sender;
 int producer_start = 0;                     /* Flag per indicare se il produttore ha iniziato a produrre task */
 int lcs_length = 0;                       /* Lunghezza della LCS (longest common subsequence) */
 
-// Variabili globali (a livello di thread) master + worker
+// AREA DATI GLOBALE: Variabili globali master + worker
 int rank;                                   /* Current process identifier */
 char hn[HOST_BUFF];                         /* Hostname of the machine */
+char *string_A, *string_B, *alphabet;       /* Pointers to the two strings and alphabet */
+int string_lengths[3];                      /* Array to store the lengths of the two strings */
+int offset_A, offset_B;
+int max_antidiagonal_length;                /* Lunghezza in blocchi della massima antidiagonale */
+int num_blocks_rows, num_blocks_cols;       /* Number of blocks in rows and columns */
+
+// AREA DATI GLOBALE: Variabili globali worker
+int **DP_matrix;
+pthread_barrier_t barrier;
+Result result;                          // risultato del task (da inviare al master)
+Task received_task;
+MPI_Request *send_requests;
+int count_send_requests = 0;
 
 int main(int argc, char *argv[])
 {
@@ -255,18 +265,23 @@ int main(int argc, char *argv[])
  
     } else {    // se sei un worker (rank > 0)
 
-        Task task;
-        Result result;                          // risultato del task (da inviare al master)
-        char stop_worker = 0;                   // flag per terminare il worker
+        pthread_t *threads = malloc(NUM_WORKER_THREADS * sizeof(pthread_t));
+        int thread_ids[NUM_WORKER_THREADS];            // Array per contenere gli ID dei thread
 
-        // variabili per il calcolo della LCS
-        int **P_Matrix;
-        int **DP_Matrix; //to store the DP values
-        
-        //MPI_Barrier(MPI_COMM_WORLD);  // Sincronizzazione tra master e worker (I worker prima di iniziare a lavorare devono aspettare che il master abbia terminato FASE 2)
-        
+        // Inizializza il barrier per "t" thread.
+        if (pthread_barrier_init(&barrier, NULL, NUM_WORKER_THREADS)) {
+            fprintf(stderr, "Errore nell'inizializzazione del pthread_barrier\n");
+            exit(EXIT_FAILURE);
+        }
+                
         // Ricevo lunghezze stringhe dal master
         MPI_Bcast(string_lengths, 3, MPI_INT, 0, MPI_COMM_WORLD); //printf("(WORKER %d on %s) (thread %lu) Ho ricevuto le 3 lunghezze.\n", rank, hn, (unsigned long)pthread_self());
+
+        num_blocks_rows = string_lengths[0] / TILE_DIM;  // numero di blocchi verticali (sulle righe della matrice)
+        num_blocks_cols = string_lengths[1]/ TILE_DIM;  // numero di blocchi orizzontali (sulle colonne)
+        max_antidiagonal_length = MIN(num_blocks_rows, num_blocks_cols); 
+
+        send_requests = malloc(max_antidiagonal_length * sizeof(MPI_Request));
 
         // Alloco memoria per le due stringhe
         string_A = malloc((string_lengths[0] + 1) * sizeof(char));
@@ -278,81 +293,43 @@ int main(int argc, char *argv[])
         MPI_Bcast(string_B, string_lengths[1] + 1, MPI_CHAR, 0, MPI_COMM_WORLD); // len_B
         MPI_Bcast(alphabet, string_lengths[2] + 1, MPI_CHAR, 0, MPI_COMM_WORLD); // len_C printf("(WORKER %d on %s) (thread %lu) Ho ricevuto le 3 stringhe.\n", rank, hn, (unsigned long)pthread_self());
 
-        DP_Matrix = malloc((TILE_DIM + 1) * sizeof(int *));
-        for(int k=0; k<(TILE_DIM + 1); k++)
-        {
-            DP_Matrix[k] = malloc((TILE_DIM + 1) * sizeof(int));
+        // Alloco memoria per la matrice DP
+        DP_matrix = malloc((TILE_DIM + 1) * sizeof(int *));
+        if (DP_matrix == NULL) {
+            fprintf(stderr, "Errore: allocazione della matrice delle righe fallita!\n");
+            exit(EXIT_FAILURE);
         }
-
-        P_Matrix = malloc(TILE_DIM * sizeof(int *)); // doppio puntatore
-        for(int k=0; k<TILE_DIM; k++)
-        {
-            P_Matrix[k] = calloc((string_lengths[1] + 1), sizeof(int));
-        }
-
-        //printf("(WORKER %d on %s) (thread %lu) Ho calcolato la matrice P.\n", rank, hn, (unsigned long)pthread_self());
-
-        while(1) {
-            // Ricevo il task dal MASTER
-            MPI_Recv(&task, sizeof(Task), MPI_BYTE, 0, TAG_TASK, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-            //if (rank == 1) printf("(WORKER %d on %s) (thread %lu) Ho ricevuto il task del blocco [%d][%d] dal master.\n", rank, hn, (unsigned long)pthread_self(), task.task_id[0], task.task_id[1]);
-            
-            if(task.angle == -1){ // condizione di uscita
-                printf("Il worker ha ricevuto messaggio terminazione.\n");
-                break;
+        for (int i = 0; i <= TILE_DIM; i++) {
+            DP_matrix[i] = calloc(TILE_DIM + 1, sizeof(int));
+            if (DP_matrix[i] == NULL) {
+                fprintf(stderr, "Errore: allocazione della riga %d fallita!\n", i);
+                exit(EXIT_FAILURE);
             }
-            //printf("(WORKER %d on %s) (thread %lu) Ho ricevuto il task del blocco [%d][%d] dal master.\n", rank, hn, (unsigned long)pthread_self(), task.task_id[0], task.task_id[1]);
-
-
- 
-            DP_Matrix[0][0] = task.angle; // inizializzo DP_Matrix[0][0] con l'angolo del task
-            //printf("(WORKER %d on %s) (thread %lu) Blocco [%d][%d] dal master. Angolo:%d.\n", rank, hn, (unsigned long)pthread_self(), task.task_id[0], task.task_id[1], task.angle);
-
-
-            for(int k=1; k<TILE_DIM + 1; k++)
-            {
-                DP_Matrix[0][k] = task.top_row[k - 1];
-                //printf("(WORKER %d on %s) (thread %lu) Blocco [%d][%d] dal master. top_row[%d]:%d.\n", rank, hn, (unsigned long)pthread_self(), task.task_id[0], task.task_id[1], k, task.top_row[k - 1]);
-                DP_Matrix[k][0] = task.left_col[k - 1];
-                //printf("(WORKER %d on %s) (thread %lu) Blocco [%d][%d] dal master. left_col[%d]:%d.\n", rank, hn, (unsigned long)pthread_self(), task.task_id[0], task.task_id[1], k, task.left_col[k - 1]);
-            }
-            //if (rank == 1) printf("(WORKER %d on %s) (thread %lu) Ho inizializzato prima riga e prima colonna della DP con il blocco %d %d.\n", rank, hn, (unsigned long)pthread_self(), task.task_id[0], task.task_id[1]);
-
-            /*int* testpuntatore;
-            testpuntatore = string_A + task.start_index_sub_a;
-            printf("(WORKER %d on %s) (thread %lu) Blocco [%d][%d] dal master. La prima lettera di A che considero è %c. Uso testpuntatore.\n", rank, hn, (unsigned long)pthread_self(), task.task_id[0], task.task_id[1], testpuntatore[0]);
-            printf("(WORKER %d on %s) (thread %lu) Blocco [%d][%d] dal master. La prima lettera di A che considero è %c.\n", rank, hn, (unsigned long)pthread_self(), task.task_id[0], task.task_id[1], string_A[task.start_index_sub_a]);
-            */
-
-            /*int* testpuntatoreB;
-            testpuntatoreB = string_B + task.start_index_sub_b;
-            printf("(WORKER %d on %s) (thread %lu) Blocco [%d][%d] dal master. La prima lettera di B che considero è %c. Uso testpuntatore.\n", rank, hn, (unsigned long)pthread_self(), task.task_id[0], task.task_id[1], testpuntatoreB[0]);
-            printf("(WORKER %d on %s) (thread %lu) Blocco [%d][%d] dal master. La prima lettera di B che considero è %c.\n", rank, hn, (unsigned long)pthread_self(), task.task_id[0], task.task_id[1], string_B[task.start_index_sub_b]);
-            */
-
-            // Invoco funzione per calcolo P_Matrix
-            calc_P_matrix_v2(P_Matrix, string_B + task.start_index_sub_b, TILE_DIM, alphabet, string_lengths[2]);
-
-            //result = lcs_yang_v2(DP_Matrix, P_Matrix, string_A + task.start_index_sub_a, string_B + task.start_index_sub_b, alphabet, TILE_DIM, TILE_DIM, string_lengths[2], (task.start_index_sub_b), task.task_id[0]); // calcolo la LCS (longest common subsequence) tra le due stringhe A e B
-
-            // Preparo messaggio di ripsosta
-            memcpy(result.task_id, task.task_id, sizeof(task.task_id)); // ID del task
-
-            
-            /*for(int k=1; k<TILE_DIM + 1; k++)
-            {
-                printf("(WORKER %d on %s) (thread %lu) Ho preparato il risultato del blocco [%d][%d] dal master. bottom_row[%d]:%d.\n", rank, hn, (unsigned long)pthread_self(), task.task_id[0], task.task_id[1], k, result.bottom_row[k - 1]);
-                printf("(WORKER %d on %s) (thread %lu) Ho preparato il risultato del blocco [%d][%d] dal master. right_col[%d]:%d.\n", rank, hn, (unsigned long)pthread_self(), task.task_id[0], task.task_id[1], k, result.right_col[k - 1]);
-            }*/
-            
-            // Invio il risultato del task al MASTER
-            MPI_Send(&result, sizeof(Result), MPI_BYTE, 0, TAG_RESULT, MPI_COMM_WORLD);
-            //printf("(WORKER %d on %s) (thread %lu) Invio il risultato del calcolo del task del blocco [%d][%d].\n", rank, hn, (unsigned long)pthread_self(), task.task_id[0], task.task_id[1]);
         }
 
-        free(DP_Matrix); // libero memoria allocata su heap per DP_Matrix
-        free(P_Matrix); // libero memoria allocata su heap per P_Matrix
+        // Crea i thread
+        for (int i = 0; i < NUM_WORKER_THREADS; i++) {
+            thread_ids[i] = i; // Assegniamo l'ID ad ogni indice
+            if (pthread_create(&threads[i], NULL, lcs_thread_func, &thread_ids[i])) {
+                fprintf(stderr, "Errore nella creazione del thread %d\n", i);
+                exit(EXIT_FAILURE);
+            }
+        }
 
+        // Attendi il completamento di tutti i thread
+        for (int i = 0; i < NUM_WORKER_THREADS; i++) {
+            pthread_join(threads[i], NULL);
+        }
+
+        // Distruggi il barrier e libera le risorse allocate per i thread
+        pthread_barrier_destroy(&barrier);
+        free(threads);
+
+        for (int i = 0; i <= TILE_DIM; i++) {
+            free(DP_matrix[i]);
+        }
+        free(DP_matrix);
+        free(send_requests);
     }
 
     // libero memoria allocata su heap per ciascun processo (tutti i processi MPI eseguono questo codice)
@@ -380,7 +357,7 @@ int main(int argc, char *argv[])
 
 void *task_producer(void *args) { // funzione di thread
 
-    MPI_Request recv_requests; // richiesta di ricezione
+    MPI_Request send_request; // richiesta di ricezione
 
     Task task;
     int task_counter = 0; // Contatore globale per i task
@@ -396,27 +373,21 @@ void *task_producer(void *args) { // funzione di thread
             int j = d - i; // siccome i + j = d 
 
             // Ora (i, j) è un blocco valido sulla diagonale d
-
-            //carico_fittizio(100000); // carico fittizio per evitare che il master sia troppo veloce rispetto ai worker
-
             task.task_id[0] = i; task.task_id[1] = j; // task_id è un array di due interi (i, j) che rappresentano la posizione del blocco nella matrice
-
             task.start_index_sub_a = i * TILE_DIM; // Indice iniziale della porzione di stringa A da considerare
             task.start_index_sub_b = j * TILE_DIM; // Indice iniziale della porzione di stringa B da considerare
             INITIALIZE_TASK(task, task_counter); // Ensure task_counter is properly defined in the surrounding scope
             task_counter++; // Incrementa il contatore
-            //printf("(MASTER %d on %s) (thread %lu) Task %d enqueued.\n", rank, hn, (unsigned long)pthread_self(), (i+ i_end)); // DEBUG
         }
 
         // Invio il primo task al worker 1 (avvio il sistema degli invii/ricezioni)
         if(!d) {
-            MPI_Send(&task_queue[0], sizeof(Task), MPI_BYTE, 1, TAG_TASK, MPI_COMM_WORLD);
+            MPI_Isend(&task_queue[0], sizeof(Task), MPI_BYTE, 1, TAG_TASK, MPI_COMM_WORLD, &send_request);
         }
-
-
     }
 
-    printf("Ho finito di generare i task.\n");
+    MPI_Wait(&send_request, MPI_STATUS_IGNORE);
+
     pthread_exit(NULL); // termino esplicitamente il thread corrente
 }
 
@@ -437,8 +408,6 @@ void *pending_task_sender(void *args) { // funzione di thread
 
     int c = 0;
 
-    int blocchi_inviati = 0; // contatore per i task non inizializzati
-
     while(1) {
 
         while(!pending_task_index[c]) { // finchè l'indice è zero entra
@@ -449,17 +418,10 @@ void *pending_task_sender(void *args) { // funzione di thread
 
         while(!task_queue[pending_task_index[c]].initialized) { } // fino a quando il task non è inizializzato dal produttore cicla a vuoto
 
-        printf("----------------------------\n--------------------------------------\n-------------------------------------------\n----------------------------------------------------\n");
         pthread_mutex_lock(&rank_worker_mutex);  // Entra nella sezione critica
         MPI_Send(&task_queue[pending_task_index[c]], sizeof(Task), MPI_BYTE, rank_worker, TAG_TASK, MPI_COMM_WORLD);
-        //printf("(MASTER %d on %s) (thread %lu) PTS Ho inviato il blocco (%d, %d) al worker %d.\n", rank, hn, (unsigned long)pthread_self(), task_queue[pending_task_index[c]].task_id[0], task_queue[pending_task_index[c]].task_id[1], rank_worker);
-        blocchi_inviati++;
         rank_worker = (rank_worker == max_rank_worker) ? 1 : ++rank_worker; // incremento del rank del worker a cui inviare il messaggio
         pthread_mutex_unlock(&rank_worker_mutex); // Esce dalla sezione critica
-
-        if(c == (max_antidiagonal_length)) { // se sono arrivato all'ultimo task da inviare
-            printf("PST Ho raggiunto la massima dimensione dell'array.\n");
-        }
 
         pending_task_index[c] = 0;
 
@@ -468,9 +430,6 @@ void *pending_task_sender(void *args) { // funzione di thread
     }
 
     exit:
-
-    printf("(MASTER %d on %s) (thread %lu) PTS Ho inviato %d blocchi.\n", rank, hn, (unsigned long)pthread_self(), blocchi_inviati);
-
     pthread_exit(NULL); // termino esplicitamente il thread corrente
 }
 
@@ -481,21 +440,20 @@ void *task_sender(void *args) { // funzione di thread
     int i;
     int j;
 
-    int blocchi_inviati = 0; // contatore per i task non inizializzati
-
     int index_right;
     int index_down;
     int index_right_down;
 
     MPI_Status status; // Variabile per lo stato del messaggio
+    MPI_Request send_requests[max_antidiagonal_length];
 
+    int count_requests = 0; // Contatore per le richieste di invio
     int count_pending_task = 0;
 
     char stop_sender = 0;
 
     while(!stop_sender) { // per ogni worker (rank > 0) while(stop_sender == false)
 
-        //printf("(MASTER %d on %s) (thread %lu) Mi preparo a ricevere il risultato.\n", rank, hn, (unsigned long)pthread_self());
         MPI_Recv(&result, sizeof(Result), MPI_BYTE, MPI_ANY_SOURCE, TAG_RESULT, MPI_COMM_WORLD, &status);
 
         i = result.task_id[0]; // recupero i valori di i e j dal task ricevuto
@@ -503,16 +461,12 @@ void *task_sender(void *args) { // funzione di thread
         
         pthread_mutex_lock(&rank_worker_mutex);  // Entra nella sezione critica
         rank_worker = status.MPI_SOURCE; // recupero il rank del worker che mi ha inviato il messaggio
-        //printf("(MASTER %d on %s) (thread %lu) Ho ricevuto il risultato del blocco [%d][%d] dal worker %d.\n", rank, hn, (unsigned long)pthread_self(), result.task_id[0], result.task_id[1], rank_worker);
         pthread_mutex_unlock(&rank_worker_mutex); // Esce dalla sezione critica
 
-        //printf("(MASTER %d on %s) (thread %lu) siamo arrivati al blocco %d %d.\n", rank, hn, (unsigned long)pthread_self(), i, j);
-        //printf("(MASTER %d on %s) (thread %lu) siamo arrivati al blocco %d %d.\n", rank, hn, (unsigned long)pthread_self(), i, j);
 
         if (j < num_blocks_cols - 1) { // controllo se non sono l'ultima colonna (j == N - 1)
 
             index_right = block_index(i, j + 1, num_blocks_rows, num_blocks_cols); // calcolo l'indice dell'array task_queue nel quale è presente il blocco a destra di quello ricevuto
-            //printf("(MASTER %d on %s) (thread %lu) Il blocco a destra, (%d, %d), ha indice %d.\n", rank, hn, (unsigned long)pthread_self(), task_queue[index_right].task_id[0], task_queue[index_right].task_id[1], index_right);
             
             memcpy(task_queue[index_right].left_col, result.right_col, sizeof(result.right_col)); // inietto dipendenza nel task
             task_queue[index_right].left_col_ready = 1; // setto il flag a 1 (pronta)
@@ -520,19 +474,17 @@ void *task_sender(void *args) { // funzione di thread
 
             if(!i || (task_queue[index_right].top_row_ready && task_queue[index_right].angle_ready)) {
                 if(task_queue[index_right].initialized) {
-                    //printf("(MASTER %d on %s) (thread %lu) Mi preparo ad inviare il blocco (%d, %d) con indice %d.\n", rank, hn, (unsigned long)pthread_self(), task_queue[index_right].task_id[0], task_queue[index_right].task_id[1], index_right);
 
                     pthread_mutex_lock(&rank_worker_mutex);  // Entra nella sezione critica
-                    MPI_Send(&task_queue[index_right], sizeof(Task), MPI_BYTE, rank_worker, TAG_TASK, MPI_COMM_WORLD);
-                    blocchi_inviati++;
-                    //printf("(MASTER %d on %s) (thread %lu) 1 Ho inviato il blocco (%d, %d) con indice %d al worker %d.\n", rank, hn, (unsigned long)pthread_self(), task_queue[index_right].task_id[0], task_queue[index_right].task_id[1], index_right, rank_worker);
+                    //MPI_Send(&task_queue[index_right], sizeof(Task), MPI_BYTE, rank_worker, TAG_TASK, MPI_COMM_WORLD);
+                    MPI_Isend(&task_queue[index_right], sizeof(Task), MPI_BYTE, rank_worker, TAG_TASK, MPI_COMM_WORLD, &send_requests[count_requests]);
                     rank_worker = (rank_worker == max_rank_worker) ? 1 : ++rank_worker; // incremento del rank del worker a cui inviare il messaggio
                     pthread_mutex_unlock(&rank_worker_mutex); // Esce dalla sezione critica
+                    count_requests = (count_requests == (max_antidiagonal_length - 1)) ? 0 : ++count_requests; // incremento del contatore delle richieste di invio
 
                 }
                 else {
                     pending_task_index[count_pending_task] = index_right;
-                    //printf("(MASTER %d on %s) (thread %lu) 1 Ho inserito blocco (%d, %d) alla posizione %d di pendig_tasq_index. index_right %d.\n",  rank, hn, (unsigned long)pthread_self(), task_queue[index_right].task_id[0], task_queue[index_right].task_id[1], count_pending_task, index_right);
                     count_pending_task = (count_pending_task == (max_antidiagonal_length)) ? 0 : ++count_pending_task;
                 }
             }
@@ -543,26 +495,22 @@ void *task_sender(void *args) { // funzione di thread
         if (i < num_blocks_rows - 1) { // controllo se non sono l'ultima riga (i == M - 1)
 
             index_down = block_index(i + 1, j, num_blocks_rows, num_blocks_cols); // calcolo l'indice dell'array task_queue nel quale è presente il blocco sotto di quello ricevuto
-            //printf("(MASTER %d on %s) (thread %lu) Il blocco sotto, (%d, %d), ha indice %d.\n", rank, hn, (unsigned long)pthread_self(), task_queue[index_down].task_id[0], task_queue[index_down].task_id[1], index_down);
             
             memcpy(task_queue[index_down].top_row, result.bottom_row, sizeof(result.bottom_row)); // inietto dipendenza nel task
             task_queue[index_down].top_row_ready = 1; // setto il flag a 1 (pronta)
 
             if(!j || (task_queue[index_down].left_col_ready && task_queue[index_down].angle_ready)) {
                 if(task_queue[index_down].initialized) {
-                    //printf("(MASTER %d on %s) (thread %lu) Mi preparo ad inviare il blocco (%d, %d) con indice %d.\n", rank, hn, (unsigned long)pthread_self(), task_queue[index_down].task_id[0], task_queue[index_down].task_id[1], index_down);
                     
                     pthread_mutex_lock(&rank_worker_mutex);  // Entra nella sezione critica
-                    MPI_Send(&task_queue[index_down], sizeof(Task), MPI_BYTE, rank_worker, TAG_TASK, MPI_COMM_WORLD);
-                    blocchi_inviati++;
-                    //printf("(MASTER %d on %s) (thread %lu) 2 Ho inviato il blocco (%d, %d) con indice %d al worker %d.\n", rank, hn, (unsigned long)pthread_self(), task_queue[index_down].task_id[0], task_queue[index_down].task_id[1], index_down, rank_worker);
+                    MPI_Isend(&task_queue[index_down], sizeof(Task), MPI_BYTE, rank_worker, TAG_TASK, MPI_COMM_WORLD, &send_requests[count_requests]);
                     rank_worker = (rank_worker == max_rank_worker) ? 1 : ++rank_worker; // incremento del rank del worker a cui inviare il messaggio
                     pthread_mutex_unlock(&rank_worker_mutex); // Esce dalla sezione critica
+                    count_requests = (count_requests == (max_antidiagonal_length - 1)) ? 0 : ++count_requests; // incremento del contatore delle richieste di invio
 
                 }
                 else {
                     pending_task_index[count_pending_task] = index_down;
-                    //printf("(MASTER %d on %s) (thread %lu) 2 Ho inserito blocco (%d, %d) alla posizione %d di pendig_tasq_index.\n", rank, hn, (unsigned long)pthread_self(),  task_queue[index_down].task_id[0], task_queue[index_down].task_id[1], count_pending_task);
                     count_pending_task = (count_pending_task == (max_antidiagonal_length)) ? 0 : ++count_pending_task;
                 }
             }
@@ -571,26 +519,21 @@ void *task_sender(void *args) { // funzione di thread
         if(j != (num_blocks_cols - 1) && i != (num_blocks_rows - 1)) { // basta che sono o all'ultima riga o all'ultima colonna e non entro nell'if
             
             index_right_down = block_index(i + 1, j + 1, num_blocks_rows, num_blocks_cols);
-            //printf("(MASTER %d on %s) (thread %lu) Il blocco in basso a destra (angolo), (%d, %d), ha indice %d.\n", rank, hn, (unsigned long)pthread_self(), task_queue[index_right_down].task_id[0], task_queue[index_right_down].task_id[1], index_right_down);
 
             task_queue[index_right_down].angle = result.bottom_row[TILE_DIM - 1]; // inietto dipendenza nel task
             task_queue[index_right_down].angle_ready = 1; // setto il flag a 1 (pronta)
 
             if(task_queue[index_right_down].left_col_ready && task_queue[index_right_down].top_row_ready) {
                 if(task_queue[index_right_down].initialized) {
-                    //printf("(MASTER %d on %s) (thread %lu) Mi preparo ad inviare il blocco (%d, %d) con indice %d.\n", rank, hn, (unsigned long)pthread_self(), task_queue[index_right_down].task_id[0], task_queue[index_right_down].task_id[1], index_right_down);
                     
                     pthread_mutex_lock(&rank_worker_mutex);  // Entra nella sezione critica
-                    MPI_Send(&task_queue[index_right_down], sizeof(Task), MPI_BYTE, rank_worker, TAG_TASK, MPI_COMM_WORLD);
-                    blocchi_inviati++;
-                    //printf("(MASTER %d on %s) (thread %lu) 3 Ho inviato il blocco (%d, %d) con indice %d al worker %d.\n", rank, hn, (unsigned long)pthread_self(), task_queue[index_right_down].task_id[0], task_queue[index_right_down].task_id[1], index_right_down, rank_worker);
+                    MPI_Isend(&task_queue[index_right_down], sizeof(Task), MPI_BYTE, rank_worker, TAG_TASK, MPI_COMM_WORLD, &send_requests[count_requests]);
                     rank_worker = (rank_worker == max_rank_worker) ? 1 : ++rank_worker; // incremento del rank del worker a cui inviare il messaggio
                     pthread_mutex_unlock(&rank_worker_mutex); // Esce dalla sezione critica
-
+                    count_requests = (count_requests == (max_antidiagonal_length - 1)) ? 0 : ++count_requests; // incremento del contatore delle richieste di invio
                 }
                 else {
                     pending_task_index[count_pending_task] = index_right_down;
-                    //printf("(MASTER %d on %s) (thread %lu) 3 Ho inserito blocco (%d, %d) alla posizione %d di pendig_tasq_index.\n", rank, hn, (unsigned long)pthread_self(), task_queue[index_right_down].task_id[0], task_queue[index_right_down].task_id[1], count_pending_task);
                     count_pending_task = (count_pending_task == (max_antidiagonal_length)) ? 0 : ++count_pending_task;
                 }
             }
@@ -599,21 +542,12 @@ void *task_sender(void *args) { // funzione di thread
             stop_sender = 1;
         }
         
-        /*if(blocchi_inviati%1000 == 0) { // ogni 1000 invii di task stampo un messaggio
-            printf("Sono il sender principale. Ho inviato %d blocchi.\n", blocchi_inviati);
-        }*/
     }
-
-    printf("(MASTER %d on %s) (thread %lu) Ho inviato %d blocchi.\n", rank, hn, (unsigned long)pthread_self(), blocchi_inviati);
-
-    printf("Il master ha ricevuto l'ultimo blocco.\n");
 
     stop_pending_sender = 1;
 
     Task task;
     task.angle = -1; // invio un task con angolo -1 per terminare i worker
-    printf("Il master ha inviato messaggio broadcast.\n");
-
     for (int k=1; k<=max_rank_worker; k++) {
         MPI_Send(&task, sizeof(Task), MPI_BYTE, k, TAG_TASK, MPI_COMM_WORLD); // invio il messaggio di stop a tutti i worker
     }
@@ -669,75 +603,122 @@ void carico_fittizio(int iterazioni) {
     }
 }
 
-void calc_P_matrix_v2(int **P_Matrix, char *string_B, int len_b, char *alphabet, int len_c)
-{
-    #pragma omp parallel for
-    for(int i=0; i<len_c; i++)
-    {
-        for(int j=1; j<len_b+1; j++)
-        {
-            if(string_B[j-1] == alphabet[i])
-            {
-                P_Matrix[i][j] = j;
-            }
-            else
-            {
-                P_Matrix[i][j] = P_Matrix[i][j-1];
-            }
-            //printf("(WORKER %d on %s) (thread %lu) P_Matrix[%d][%d] = %d.\n", rank, hn, (unsigned long)pthread_self(), i, j, P_Matrix[i][j]);
+void *lcs_thread_func(void *thread_id) {
+
+    int id = *(int *)thread_id;
+
+    // calcolo blocco "base" e avanzi
+    int base      = TILE_DIM / NUM_WORKER_THREADS;       
+    int remainder = TILE_DIM % NUM_WORKER_THREADS;   
+
+    // l’id < remainder prende un elemento in più
+    int start_idx = id * base + (id < remainder ? id : remainder) + 1;
+    int count     = base + (id < remainder ? 1 : 0);
+    int end_idx   = start_idx + count - 1; 
+
+    while(1) {
+
+        if(id == 0) {
+            // Ricevo il task dal MASTER
+            MPI_Recv(&received_task, sizeof(Task), MPI_BYTE, 0, TAG_TASK, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+    
+            DP_matrix[0][0] = received_task.angle; // inizializzo DP_Matrix[0][0] con l'angolo del task
+            offset_A = received_task.start_index_sub_a; // offset_A
+            offset_B = received_task.start_index_sub_b; // offset_B
         }
-    }
-}
+        
+        pthread_barrier_wait(&barrier);
+        
+        if(received_task.angle == -1){ // condizione di uscita
+            pthread_exit(NULL);
+        }    
 
-int get_index_of_character(char *str, char x, int len)
-{
-    for(int i=0; i<len; i++)
-    {
-        if(str[i]== x)
-        {
-            return i;
+        // ora eseguo il mio pezzo di inizializzazione
+        for (int k = start_idx; k <= end_idx; ++k) {
+            DP_matrix[0][k] = received_task.top_row[k - 1];
+            DP_matrix[k][0] = received_task.left_col[k - 1];
         }
-    }
-    return -1;//not found the character x in str
-}
 
-Result lcs_yang_v2(int **DP_Matrix, int **P_Matrix, char *str_A, char *str_B, char *alphabet, int len_A, int len_B, int len_C, int offset, int flag)
-{
-    Result result; // mi creo il messaggio di risposta
+        pthread_barrier_wait(&barrier);
 
-    //printf("(WORKER %d on %s) (thread %lu) Offset è:%d.\n", rank, hn, (unsigned long)pthread_self(), offset);
-    for(int i=1; i<len_A+1; i++) // itero tutte le righe della DP_Matrix        2
-    {
-        int c_i = get_index_of_character(alphabet, str_A[i-1], len_C); //1
-        int t, s;
-	
-	    #pragma omp parallel for private(t,s) schedule(static)
-        for(int j=1; j<len_B+1; j++) // itero tutte le colonne della DP_Matrix      2
-        {
+        // The loop iterates over the antidiagonals of the DP matrix.
+        // Each thread processes a portion of the cells in the current antidiagonal.
+        // For the computation of the cells, the following observation is made:
+        // - The index d (sum of indices) varies from 2 to (len_A+len_B);
+        // - For each d, the valid indices are: i = max(1, d-len_B) ... min(len_A, d-1) with j = d - i
+        for (int d = 2; d <= TILE_DIM + TILE_DIM; d++) {
 
-            t = (0 - P_Matrix[c_i][j]) < 0; // 1
-            s = (
-                    0 - 
-                    (
-                        DP_Matrix[i-1][j] - //1
-                        (t * DP_Matrix[i-1][(P_Matrix[c_i][j] - 1)]) // 0
-                    )
-                );
+            // Determine the range of rows for this antidiagonal
+            int i_min = (d - TILE_DIM) > 1 ? (d - TILE_DIM) : 1; // max(1, d-len_B)     1
+            int i_max = (d - 1) < TILE_DIM ? (d - 1) : TILE_DIM; // min(len_A, d-1)     2
+            int count = i_max - i_min + 1; // Number of cells in the current antidiagonal   2
 
-            DP_Matrix[i][j] = ((t^1)||(s^0)) * // 0^0=0 0^1=1 1^0=1 1^1=0
-                                (DP_Matrix[i-1][j]) + 
-                                    (!((t^1)||(s^0))) * 
-                                        (DP_Matrix[i-1][(P_Matrix[c_i][j] - 1) ] + 1);
-
-            //printf("(WORKER %d on %s) (thread %lu) DP_Matrix[%d][%d] = %d.\n", rank, hn, (unsigned long)pthread_self(), i, j, DP_Matrix[i][j]);
-
-            if(i == len_A) {
-                result.bottom_row[j - 1] = DP_Matrix[i][j]; // inietto nel messsaggio di risposta la riga inferiore
+            // If the diagonal has no cells (rare case, but for safety) the thread waits
+            // and moves to the next antidiagonal.
+            if (count <= 0) {
+                pthread_barrier_wait(&barrier);
+                continue;
             }
 
+            // Distiìribution of the cells among the threads.
+            // Each thread will process a portion of the cells in the current antidiagonal.
+            int chunk_size = count / NUM_WORKER_THREADS;    //0
+            int remainder = count % NUM_WORKER_THREADS;     //2
+            int start_index, end_index;
+            if (id < remainder) { // If there are remaining elements, distribute them to the first threads
+                start_index = id * (chunk_size + 1);    // 0    1
+                end_index = start_index + (chunk_size + 1); // 1    2
+            } else {
+                start_index = id * chunk_size + remainder;
+                end_index = start_index + chunk_size;
+            }
+
+            // Compute the start and end indices on which the thread will work in the antidiagonal d.
+            for (int index = start_index; index < end_index; index++) {
+                int i = i_min + index; // 1
+                int j = d - i; // 2
+
+                int value = 0;
+                if (string_A[offset_A + i - 1] == string_B[offset_B + j - 1])
+                {
+                    // If the characters match, take the diagonal value and add 1.
+                    value = DP_MATRIX(i - 1, j - 1, DP_matrix) + 1;
+                }
+                else
+                {
+                    // If the characters do not match, take the maximum of the left and top cells.
+                    int top = DP_MATRIX(i - 1, j, DP_matrix);
+                    int left = DP_MATRIX(i, j - 1, DP_matrix);
+                    value = (top > left) ? top : left;
+                }
+
+                //printf("(WORKER %d on %s) (thread %lu) DP_MATRIX[%d][%d] = %d\n", rank, hn, (unsigned long)pthread_self(), i, j, value); // DEBUG
+                DP_MATRIX(i, j, DP_matrix) = value;
+
+                if(i == TILE_DIM) {
+                    result.bottom_row[j -1] = value; // salvo il valore della cella in basso a destra (angolo) dell'ultimo blocco
+                }
+
+                if(j == TILE_DIM) {
+                    result.right_col[i - 1] = value; // salvo il valore della cella in basso a destra (angolo) dell'ultimo blocco
+                }
+
+            }
+            // Sincronizza tutti i thread: attendi il completamento dell'antidiagonale.
+            pthread_barrier_wait(&barrier);
         }
-        result.right_col[i - 1] = DP_Matrix[i][TILE_DIM]; // inietto nel messsaggio di risposta la colonna destra
-    }
-    //MPI_Abort(MPI_COMM_WORLD, 1);
-    return result;
+
+        pthread_barrier_wait(&barrier);
+
+        if(id == 0) {
+            // Preparo messaggio di ripsosta
+            memcpy(result.task_id, received_task.task_id, sizeof(received_task.task_id)); // ID del task
+    
+            // Invio il risultato del task al MASTER
+            MPI_Isend(&result, sizeof(Result), MPI_BYTE, 0, TAG_RESULT, MPI_COMM_WORLD, &send_requests[count_send_requests]);
+            count_send_requests = (count_send_requests == (max_antidiagonal_length - 1)) ? 0 : ++count_send_requests;
+        }
+
+    }    
+
 }
