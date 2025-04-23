@@ -9,7 +9,7 @@
 
 #define NUM_WORKER_THREADS 8                // Numero di thread
 #define INNER_TILE_DIM 125   // dimensione del sotto‑blocco
-#define TILE_DIM 8125                        // Dimensione della tile (blocco)
+#define TILE_DIM 5000                        // Dimensione della tile (blocco)
 #define HOST_BUFF 256                       // Dimensione del buffer per il nome host
 #define TAG_TASK 0                          // Tag dei messaggi di tipo "invio task"
 #define TAG_RESULT 1                        // Tag dei messaggi di tipo "invio task"
@@ -94,7 +94,7 @@ int lcs_length = 0;                       /* Lunghezza della LCS (longest common
 int rank;                                   /* Current process identifier */
 char hn[HOST_BUFF];                         /* Hostname of the machine */
 char *string_A, *string_B;                  /* Pointers to the two strings and alphabet */
-int string_lengths[3];                      /* Array to store the lengths of the two strings */
+int string_lengths[2];                      /* Array to store the lengths of the two strings */
 int offset_A, offset_B;
 int max_antidiagonal_length;                /* Lunghezza in blocchi della massima antidiagonale */
 int num_blocks_rows, num_blocks_cols;       /* Number of blocks in rows and columns */
@@ -482,8 +482,8 @@ void *task_sender(void *args) { // funzione di thread
 
                     pthread_mutex_lock(&rank_worker_mutex);  // Entra nella sezione critica
                     //MPI_Send(&task_queue[index_right], sizeof(Task), MPI_BYTE, rank_worker, TAG_TASK, MPI_COMM_WORLD);
-                    MPI_Isend(&task_queue[index_right], sizeof(Task), MPI_BYTE, rank_worker, TAG_TASK, MPI_COMM_WORLD, &send_requests[count_requests]);
                     rank_worker = (rank_worker == max_rank_worker) ? 1 : ++rank_worker; // incremento del rank del worker a cui inviare il messaggio
+                    MPI_Isend(&task_queue[index_right], sizeof(Task), MPI_BYTE, rank_worker, TAG_TASK, MPI_COMM_WORLD, &send_requests[count_requests]);
                     pthread_mutex_unlock(&rank_worker_mutex); // Esce dalla sezione critica
                     count_requests = (count_requests == (max_antidiagonal_length - 1)) ? 0 : ++count_requests; // incremento del contatore delle richieste di invio
 
@@ -508,8 +508,8 @@ void *task_sender(void *args) { // funzione di thread
                 if(task_queue[index_down].initialized) {
                     
                     pthread_mutex_lock(&rank_worker_mutex);  // Entra nella sezione critica
-                    MPI_Isend(&task_queue[index_down], sizeof(Task), MPI_BYTE, rank_worker, TAG_TASK, MPI_COMM_WORLD, &send_requests[count_requests]);
                     rank_worker = (rank_worker == max_rank_worker) ? 1 : ++rank_worker; // incremento del rank del worker a cui inviare il messaggio
+                    MPI_Isend(&task_queue[index_down], sizeof(Task), MPI_BYTE, rank_worker, TAG_TASK, MPI_COMM_WORLD, &send_requests[count_requests]);
                     pthread_mutex_unlock(&rank_worker_mutex); // Esce dalla sezione critica
                     count_requests = (count_requests == (max_antidiagonal_length - 1)) ? 0 : ++count_requests; // incremento del contatore delle richieste di invio
 
@@ -534,8 +534,8 @@ void *task_sender(void *args) { // funzione di thread
                 if(task_queue[index_right_down].initialized) {
                     
                     pthread_mutex_lock(&rank_worker_mutex);  // Entra nella sezione critica
-                    MPI_Isend(&task_queue[index_right_down], sizeof(Task), MPI_BYTE, rank_worker, TAG_TASK, MPI_COMM_WORLD, &send_requests[count_requests]);
                     rank_worker = (rank_worker == max_rank_worker) ? 1 : ++rank_worker; // incremento del rank del worker a cui inviare il messaggio
+                    MPI_Isend(&task_queue[index_right_down], sizeof(Task), MPI_BYTE, rank_worker, TAG_TASK, MPI_COMM_WORLD, &send_requests[count_requests]);
                     pthread_mutex_unlock(&rank_worker_mutex); // Esce dalla sezione critica
                     count_requests = (count_requests == (max_antidiagonal_length - 1)) ? 0 : ++count_requests; // incremento del contatore delle richieste di invio
                 }
