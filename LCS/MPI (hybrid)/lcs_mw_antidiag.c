@@ -8,24 +8,26 @@
 #include "omp.h"
 
 #define NUM_WORKER_THREADS 8                // Numero di thread
-#define INNER_TILE_DIM 125   // dimensione del sotto‑blocco
-#define TILE_DIM 5000                        // Dimensione della tile (blocco)
+#define INNER_TILE_DIM 125                  // dimensione del sotto‑blocco
+#define TILE_DIM 5000                       // Dimensione della tile (blocco)
 #define HOST_BUFF 256                       // Dimensione del buffer per il nome host
 #define TAG_TASK 0                          // Tag dei messaggi di tipo "invio task"
 #define TAG_RESULT 1                        // Tag dei messaggi di tipo "invio task"
 
 /*
-    Definizione della struttura Task, che rappresenta un task da eseguire.
-    Ogni task contiene informazioni relative alla porzione di matrice da elaborare,
-    come gli indici di partenza per le stringhe A e B, i bordi superiori e sinistri,
-    l'angolo del task e i flag per indicare se i bordi sono pronti.
-*/
+ * Struttura Task: rappresenta un'unità di lavoro per l'elaborazione di una porzione di matrice.
+ * Contiene:
+ * - Indici di partenza nelle stringhe A e B.
+ * - Riferimenti ai bordi superiore e sinistro della matrice.
+ * - L'angolo di elaborazione del task.
+ * - Flag che indicano la disponibilità dei bordi.
+ */
 typedef struct {
     int task_id[2];                         // ID univoco del task
     int start_index_sub_a;                  // Inidce iniziale della porzione di stringa A da considerare
     int start_index_sub_b;                  // Inidce iniziale della porzione di stringa B da considerare
-    int  block_h;          // new: number of rows in *this* tile
-    int  block_w;          // new: number of cols in *this* tile
+    int  block_h;                           // new: number of rows in *this* tile
+    int  block_w;                           // new: number of cols in *this* tile
     int top_row[TILE_DIM];                  // Riga superiore (bordo superiore)
     int left_col[TILE_DIM];                 // Colonna sinistra (bordo sinistro)
     int angle;                              // Angolo (diagonale) del task
@@ -36,17 +38,36 @@ typedef struct {
 } Task;
 
 /*
-    Definizione della struttura Result, che rappresenta il risultato di un task.
-    Ogni risultato contiene gli ID del task e i bordi destro e inferiore.
-    Questi bordi vengono utilizzati per iniettare dipendenze nei task successivi.
-*/
+ * Struttura Result: rappresenta l'output generato da un task.
+ * Contiene:
+ * - ID del task (e del task precedente, se necessario).
+ * - Bordo destro (right_col) e bordo inferiore (bottom_row) della sottosezione elaborata.
+ * 
+ * Questi bordi sono usati per propagare i dati necessari ai task dipendenti,
+ * abilitando l'esecuzione parallela con dipendenze corrette.
+ */
 typedef struct{
     int task_id[2];   
     int right_col[TILE_DIM];               // Colonna destra (bordo destro)                    
     int bottom_row[TILE_DIM];              // Riga inferiore (bordo inferiore)
 } Result;
 
-// MACRO
+/*
+ * Macro: INITIALIZE_TASK
+ *
+ * Inizializza un task nella task_queue alla posizione indicata da task_counter.
+ * Copia i campi principali dal task sorgente, tra cui ID, indici di partenza e dimensioni del blocco.
+ * Inserisce una barriera di memoria (__atomic_thread_fence) per assicurare che
+ * tutti i dati siano visibili ad altri thread prima di impostare il flag "initialized".
+ *
+ * Parametri:
+ *  - task: struttura sorgente contenente i dati del task da copiare.
+ *  - task_counter: indice nella task_queue dove inserire il nuovo task.
+ *
+ * Nota:
+ *  L'uso della barriera __ATOMIC_RELEASE è cruciale in contesti concorrenti per
+ *  evitare che il flag "initialized" venga letto prima che gli altri dati siano consistenti.
+ */
 #define INITIALIZE_TASK(task, task_counter) { \
     task_queue[task_counter].task_id[0] = task.task_id[0]; \
     task_queue[task_counter].task_id[1] = task.task_id[1]; \
@@ -59,56 +80,84 @@ typedef struct{
 }
 #define MAX(a, b) ((a) > (b) ? (a) : (b))
 #define MIN(a, b) ((a) < (b) ? (a) : (b))
-//#define DP_MATRIX(i, j, DP_matrix) DP_matrix[i][j]
 #define DP_MATRIX(i,j) DP_matrix[i][j]
 
-/* Seguono i prototipi di funzione */
+/* =========================================================================
+ * Prototipi di funzione
+ * =========================================================================
+ */
 void handle_PAPI_error(int, char*);
-Task create_task(int i, int j, int dim, char *A, char *B, int len_a, int len_b);
 void carico_fittizio(int iterazioni);
+Task create_task(int i, int j, int dim, char *A, char *B, int len_a, int len_b);
 Result lcs_yang_v2(int **DP, int **P, char *A, char *B, char *C, int m, int n, int u, int offset, int flag);
 
-/* Seguono i prototipi di funzione di thread (funzioni eseguibili dai thread) */
+/* =========================================================================
+ * Prototipi delle funzioni eseguibili dai thread
+ * =========================================================================
+ *
+ * Queste funzioni rappresentano i punti di ingresso per i thread. 
+ */
 void *task_producer(void *args);
 void *task_sender(void *args);
 void *pending_task_sender(void *args);
 void *send_sequences(void *args);
 void lcs_block_wavefront(Task *received_task_ptr);
 
-int num_processes;                          /* Number of processes in MPI_COMM_WORLD */
-
-// AREA DATI GLOBALE: Variabili globali processo master
-Task *task_queue;                           // Coda dei task (da inviare ai worker)
-int finished_generating;                    /* Flag per indicare se il master ha finito di generare task */
-int num_blocks;                             /* Number of blocks in the matrix (after tailing) */
-int num_antidiagonals;                      /* Numero totale di antidiagonali */
-int *pending_task_index;                    /* Indice del task non inizializzato (da inviare al worker) */
-int rank_worker;                            /* Rank del worker a cui devo inviare il messaggio */
-pthread_mutex_t rank_worker_mutex;          /* Mutex per proteggere l'accesso alla variabile rank_worker */
-int max_rank_worker;                        /* Massimo rank tra i worker a cui posso inviare un messaggio */
+/*
+ * =========================================================================
+ * AREA DATI GLOBALE - Variabili globali utilizzate dal processo master
+ * =========================================================================
+ * Questa sezione raccoglie tutte le variabili globali accessibili dal 
+ * processo master. Esse vengono utilizzate per il coordinamento dei task, 
+ * la gestione della concorrenza e la comunicazione tra thread e processi 
+ * (es. tramite MPI e pthreads).
+ * =========================================================================
+ */
+int finished_generating;                    // Flag per indicare se il master ha finito di generare task
+int num_blocks;                             // Number of blocks in the matrix (after tailing)
+int num_antidiagonals;                      // Numero totale di antidiagonali
+int *pending_task_index;                    // Indice del task non inizializzato (da inviare al worker)
+int rank_worker;                            // Rank del worker a cui devo inviare il messaggio
+int max_rank_worker;                        // Massimo rank tra i worker a cui posso inviare un messaggio
+int producer_start = 0;                     // Flag per indicare se il produttore ha iniziato a produrre task
+int lcs_length = 0;                         // Lunghezza della LCS (longest common subsequence) 
+int num_processes;                          // Number of processes in MPI_COMM_WORLD 
 char stop_pending_sender;
-int producer_start = 0;                     /* Flag per indicare se il produttore ha iniziato a produrre task */
-int lcs_length = 0;                       /* Lunghezza della LCS (longest common subsequence) */
+pthread_mutex_t rank_worker_mutex;          // Mutex per proteggere l'accesso alla variabile rank_worker
+Task *task_queue;                           // Coda dei task (da inviare ai worker)
 
-// AREA DATI GLOBALE: Variabili globali master + worker
-int rank;                                   /* Current process identifier */
-char hn[HOST_BUFF];                         /* Hostname of the machine */
-char *string_A, *string_B;                  /* Pointers to the two strings and alphabet */
-int string_lengths[2];                      /* Array to store the lengths of the two strings */
+/*
+ * =========================================================================
+ * AREA DATI GLOBALE - Variabili globali per il processo master e i worker
+ * =========================================================================
+ * Questa sezione contiene tutte le variabili globali utilizzate sia dal 
+ * processo master che dai worker.
+ * =========================================================================
+ */
+int rank;                                   // Current process identifier
 int offset_A, offset_B;
-int max_antidiagonal_length;                /* Lunghezza in blocchi della massima antidiagonale */
-int num_blocks_rows, num_blocks_cols;       /* Number of blocks in rows and columns */
+int max_antidiagonal_length;                // Lunghezza in blocchi della massima antidiagonale
+int num_blocks_rows, num_blocks_cols;       // Number of blocks in rows and columns
+int string_lengths[2];                      // Array to store the lengths of the two strings
+char *string_A, *string_B;                  // Pointers to the two strings and alphabet
+char hn[HOST_BUFF];                         // Hostname of the machine
 
-// AREA DATI GLOBALE: Variabili globali worker
-//int **DP_matrix;
+/*
+ * =========================================================================
+ * AREA DATI GLOBALE - Variabili globali per i worker
+ * =========================================================================
+ * Questa sezione contiene le variabili globali specifiche per i worker 
+ * all'interno del sistema parallelo. Queste variabili sono utilizzate per 
+ * gestire lo stato e il comportamento dei worker, inclusi la sincronizzazione 
+ * tra di essi e il coordinamento con il processo master.
+ * =========================================================================
+ */
 int *DP_data;
 int **DP_matrix;
-pthread_barrier_t barrier;
-Result result;                          // risultato del task (da inviare al master)
-//Task received_task;
+int inner_block_num;                                     // Numero sotto‑blocchi che occorrono per coprire TILE_DIM
+Result result;                              // Risultato del task (da inviare al master)
 MPI_Request *send_requests;
-int count_send_requests = 0;
-int NB;
+//Task received_task;
 
 int main(int argc, char *argv[])
 {
@@ -119,20 +168,20 @@ int main(int argc, char *argv[])
         A livello di thread queste variabili sono globali (condivisione di memoria).
     */ 
 
-    int provided;                           /* MPI thread level supported */
-    int rc;                                 /* Return code used in error handling */
-    long_long time_start, time_stop;        /* To measure execution time */
-    long_long num_cache_miss;               /* To measure number of cache misses */
-    int event_set = PAPI_NULL;              /* Group of hardware events for PAPI library */
+    int provided;                           // MPI thread level supported
+    int rc;                                 // Return code used in error handling
+    int event_set = PAPI_NULL;              // Group of hardware events for PAPI library
+    long_long time_start, time_stop;        // To measure execution time
+    long_long num_cache_miss;               // To measure number of cache misses
 
     // Start MPI setup (ogni processo MPI esegue questo codice)
     if((rc = MPI_Init_thread(&argc, &argv, MPI_THREAD_SERIALIZED, &provided)) != MPI_SUCCESS) {
         fprintf(stderr, "MPI_Init error. Return code: %d\n", rc);
-        exit(-1);
+        exit(EXIT_FAILURE);
     } 
     if(provided < MPI_THREAD_SERIALIZED) {
         fprintf(stderr, "Minimum MPI threading level requested: %d (provided: %d)\n", MPI_THREAD_SERIALIZED, provided);
-        exit(-1);
+        exit(EXIT_FAILURE);
     }
     // End MPI setup
 
@@ -153,162 +202,105 @@ int main(int argc, char *argv[])
     gethostname(hn, HOST_BUFF); // recupero il nome dell'host (della macchina su cui è eseguito il processo)
     max_rank_worker = num_processes - 1;
 
-    if (!rank) {    // se sei il processo master (rank 0)
+    if (!rank) {    // Se sei il processo master (rank 0)
 
         /*
             Quì dentro ci entra solo il processo master (rank 0).
             Le variabili dichiarate in questa sezione di codice sono visibili a tutti i thread del processo master.
         */
 
-        FILE *fp;                                   /* File pointer for input file */
-        stop_pending_sender = 0;                     /* Flag per terminare il thread pending_task_sender */
-
-        /* 
-            Inizializzo una mutex che sarà visibile a tutti i thread del processo master.
-            Le mutex (mutual exclusion) permettono di escludere accesso concorrente a una sezione critica del codice.
-            - pthread_mutex_t: tipo di dato che rappresenta la mutex
-            - queue_mutex : nome variabile che rappresenta la mutex
-            - PTHREAD_MUTEX_INITIALIZER: macro che fornisce inizializzazione di default alla mutex
-
-            Inizializzo una variabile condition.
-            Consente mettere i thread in attesa e risvegliarli.
-            - pthread_cond_t: tipo di dato che rappresenta la condvar
-            - queue_mutex : nome variabile che rappresenta la condvar
-            - PTHREAD_MUTEX_INITIALIZER: macro che fornisce inizializzazione di default alla condvar
-        */
+        FILE *fp;                                   // File pointer for input file
+        stop_pending_sender = 0;                    // Flag per terminare il thread pending_task_sender
         
-        /* PThreads setup */
+        // PThreads setup
         rc = pthread_mutex_init(&rank_worker_mutex, NULL);
-        //rc |= pthread_cond_init(&queue_not_empty, NULL);
         if (rc) { 
-            printf("PThread elements init error.");
+            printf("PThread elements init error.\n");
             exit(-1);
         }
 
-        // Dichiaro due variabili di tipo pthread_t che rappresentano i thread nel programma (non sto creando i thread)
-        pthread_t producer_thread, sender_thread, sender_thread_2, send_sequences_thread; // thread per la generazione dei task e per l'invio dei task ai worker
+        pthread_t producer_thread, sender_thread, sender_thread_2, send_sequences_thread; // Dichiaro variabili di tipo pthread_t che rappresentano i thread nel programma (non sto creando i thread)
 
-        // ******************************************** INIZIO FASE 1: Il master legge il file di input ********************************************
+        // ========================== INIZIO FASE 1: Il master legge il file di input ==========================
         if(argc <= 1){
-            printf("Error: No input file specified! Please specify the input file, and run again!\n");
+            fprintf(stderr, "Error: No input file specified! Please specify the input file, and run again!\n");
             return 0;
         }
-        //printf("(MASTER %d on %s) (thread %lu) I have read input file: %s \n", rank, hn, (unsigned long)pthread_self(), argv[1]);
-
-        /* Opening input files in dir "argv[1]" */
-        if((fp = fopen(argv[1], "r")) == NULL) {
-            fprintf(stderr, "Error while opening grid file.\n");
+        if((fp = fopen(argv[1], "r")) == NULL) { // Opening input files in dir "argv[1]"
+            fprintf(stderr, "Error while opening file.");
             exit(-1);
         }
-
         fscanf(fp, "%d %d", &string_lengths[0], &string_lengths[1]);
-
         printf("(MASTER %d on %s) (thread %lu) Sequence lengths: %d %d\n", rank, hn, (unsigned long)pthread_self(), string_lengths[0], string_lengths[1]);
-
-        // alloco memoria per le due stinghe
         string_A = malloc((string_lengths[0] + 1) * sizeof(char));
         string_B = malloc((string_lengths[1] + 1) * sizeof(char));
+        fscanf(fp, "%s %s", string_A, string_B); // Carico le stringhe in memoria
+        fclose(fp); // chiudo il file di dati di input
+        // ========================== FINE FASE 1: Il master legge il file di input ==========================
 
-        // carico le stringhe in memoria
-        fscanf(fp, "%s %s", string_A, string_B);
+        time_start = PAPI_get_real_usec(); // Inizio misurazione tempo
 
-        //printf("(MASTER %d on %s) (thread %lu) Sequences read.\n", rank, hn, (unsigned long)pthread_self());
-
-        // chiudo il file di dati di input
-        fclose(fp);
-        // ******************************************** FINE FASE 1: Il master legge il file di input ********************************************
-
-        time_start = PAPI_get_real_usec(); // inizio misurazione tempo
-
-        // ******************************************** INIZIO FASE 2: Tiling ********************************************
-        num_blocks_rows = (string_lengths[0] + TILE_DIM - 1) / TILE_DIM;  // numero di blocchi verticali (sulle righe della matrice)
-        num_blocks_cols = (string_lengths[1] + TILE_DIM - 1) / TILE_DIM;  // numero di blocchi orizzontali (sulle colonne)
-        num_antidiagonals = num_blocks_rows + num_blocks_cols - 1;  // il numero totale di antidiagonali è dato da blocchi_righe + blocchi_colonne - 1
+        // ========================== INIZIO FASE 2: Tiling e setup relativi ==========================
+        num_blocks_rows = (string_lengths[0] + TILE_DIM - 1) / TILE_DIM; // numero di blocchi verticali (sulle righe della matrice)
+        num_blocks_cols = (string_lengths[1] + TILE_DIM - 1) / TILE_DIM; // numero di blocchi orizzontali (sulle colonne)
+        num_antidiagonals = num_blocks_rows + num_blocks_cols - 1; // il numero totale di antidiagonali è dato da blocchi_righe + blocchi_colonne - 1
         num_blocks = num_blocks_rows * num_blocks_cols; // numero totale di blocchi (sulle righe e colonne della matrice)
-        printf("(MASTER %d on %s) (thread %lu) Terminato il tiling:\n- numero blocchi per ogni riga: %d;\n- numero blocchi per ogni colonna: %d;\n- numero antidiagonali: %d;\n- numero totale di blocchi: %d\n", rank, hn, (unsigned long)pthread_self(), num_blocks_rows, num_blocks_cols, num_antidiagonals, num_blocks);
-        // ******************************************** FINE FASE 2: Tiling ********************************************
-
+        //printf("(MASTER %d on %s) (thread %lu) Terminato il tiling:\n- numero blocchi per ogni riga: %d;\n- numero blocchi per ogni colonna: %d;\n- numero antidiagonali: %d;\n- numero totale di blocchi: %d\n", rank, hn, (unsigned long)pthread_self(), num_blocks_rows, num_blocks_cols, num_antidiagonals, num_blocks);
         max_antidiagonal_length = MIN(num_blocks_rows, num_blocks_cols);
         task_queue = calloc(num_blocks, sizeof(Task)); // alloco memoria per la coda dei task (da inviare ai worker)
         pending_task_index = calloc(max_antidiagonal_length + 1, sizeof(int)); // alloco memoria per tanti interi quanti sono i blocchi sulla antidiagonale massima
+        // ========================== FINE FASE 2: Tiling  e setup relativi ==========================
 
-        // Invio ai worker le dimensioni delle 2 sequenze
-        MPI_Bcast(string_lengths, 3, MPI_INT, 0, MPI_COMM_WORLD);
-        printf("(MASTER %d on %s) (thread %lu) Ho inviato l'array contenente le 3 lunghezze.\n", rank, hn, (unsigned long)pthread_self());
-
-        // Invio le due sequenze e l'alfabeto ai worker
+        // Invio ai worker le dimensioni delle 2 sequenze e le sequenze stesse
+        MPI_Bcast(string_lengths, 2, MPI_INT, 0, MPI_COMM_WORLD);
         MPI_Bcast(string_A, string_lengths[0] + 1, MPI_CHAR, 0, MPI_COMM_WORLD);
         MPI_Bcast(string_B, string_lengths[1] + 1, MPI_CHAR, 0, MPI_COMM_WORLD);
-        printf("(MASTER %d on %s) (thread %lu) Ho inviato le stringhe e l'alfabeto.\n", rank, hn, (unsigned long)pthread_self());
 
-        //MPI_Barrier(MPI_COMM_WORLD); // Sincronizzazione tra master e worker
-        //printf("(MASTER %d on %s) (thread %lu) Ho superato la barriera.\n", rank, hn, (unsigned long)pthread_self());
+        // Creazione dei thread
+        rc = pthread_create(&producer_thread, NULL, task_producer, NULL); // Thread per la generazione dei task
+        rc |= pthread_create(&sender_thread, NULL, task_sender, NULL); // Thread per l'invio dei task ai worker
+        rc |= pthread_create(&sender_thread_2, NULL, pending_task_sender, NULL); // Thread per l'invio dei task ai worker
+        if (rc) { 
+            fprintf(stderr, "PThread creation error. Return code: %d\n", rc);
+            exit(EXIT_FAILURE);
+        }
 
-        // creazione dei thread
-        //pthread_create(&send_sequences_thread, NULL, send_sequences, NULL); // creo thread per invio delle lunghezze delle stringhe e delle stringhe stesse ai worker
-        pthread_create(&producer_thread, NULL, task_producer, NULL); // thread per la generazione dei task
-        pthread_create(&sender_thread, NULL, task_sender, NULL); // thread per l'invio dei task ai worker
-        pthread_create(&sender_thread_2, NULL, pending_task_sender, NULL); // thread per l'invio dei task ai worker
-
-        // attendi entrambi
-        pthread_join(producer_thread, NULL); // il main thread del master si sospende e aspetta che il thread producer termini (sincronizzazione su condizione)
-        printf("Ha terminato il thread producer.\n");
-
-        //printf("(MASTER %d on %s) (thread %lu) Threads created: producer and sender.\n", rank, hn, (unsigned long)pthread_self());
-
-        pthread_join(sender_thread, NULL); // il main thread del master si sospende e aspetta che il thread sender termini (sincronizzazione su condizione)
-        printf("Ha terminato il thread sender.\n");
-
-        //pthread_join(send_sequences, NULL);
-
-        // termina esplicitamente il thread sender_thread_2
-        pthread_cancel(sender_thread_2);
+        pthread_join(producer_thread, NULL); // Il main thread del master si sospende e aspetta che il thread producer termini (sincronizzazione su condizione)
+        pthread_join(sender_thread, NULL); // Il main thread del master si sospende e aspetta che il thread sender termini (sincronizzazione su condizione)
+        pthread_cancel(sender_thread_2); // Termina esplicitamente il thread sender_thread_2
         pthread_join(sender_thread_2, NULL);
-        printf("Ha terminato il sender 2.\n");
 
-        //printf("(MASTER %d on %s) (thread %lu) Threads terminated: producer and sender.\n", rank, hn, (unsigned long)pthread_self());
-
-        // libero memoria allocata su heap (esegue questo codice solo il main thread del processo master)
- 
-    } else {    // se sei un worker (rank > 0)
+    } else { // Se sei un worker (rank > 0)
         
-        // 1) Ricevo le lunghezze e poi alloco i buffer per le stringhe
-        MPI_Bcast(string_lengths, 3, MPI_INT, 0, MPI_COMM_WORLD);
+        // Ricevo le lunghezze e poi alloco i buffer per le stringhe
+        MPI_Bcast(string_lengths, 2, MPI_INT, 0, MPI_COMM_WORLD);
     
-        // Alloco memoria per le due stringhe e l'alfabeto
+        // Alloco memoria per le due stringhe
         string_A = malloc((string_lengths[0] + 1) * sizeof(char));
         string_B = malloc((string_lengths[1] + 1) * sizeof(char));
         if (!string_A || !string_B) {
-            perror("alloc string buffers");
+            perror("Alloc string buffers");
             exit(EXIT_FAILURE);
         }
     
-        // 2) Ricevo effettivamente le stringhe
+        // Ricevo effettivamente le stringhe
         MPI_Bcast(string_A, string_lengths[0] + 1, MPI_CHAR, 0, MPI_COMM_WORLD);
         MPI_Bcast(string_B, string_lengths[1] + 1, MPI_CHAR, 0, MPI_COMM_WORLD);
 
-        // 2) calcolo quanti sotto‑blocchi occorrono per coprire TILE_DIM
-        NB = (TILE_DIM + INNER_TILE_DIM - 1) / INNER_TILE_DIM; // numero blocchi per dimensione
-    
-        // 3) Alloca DP_matrix
-        /*DP_matrix = malloc((TILE_DIM + 1) * sizeof(int *));
-        if (!DP_matrix) { perror("alloc DP_matrix"); exit(EXIT_FAILURE); }
-        for (int i = 0; i <= TILE_DIM; i++) {
-            DP_matrix[i] = calloc(TILE_DIM + 1, sizeof(int));
-            if (!DP_matrix[i]) { perror("alloc DP_matrix row"); exit(EXIT_FAILURE); }
-        }*/
+        // Calcolo quanti sotto‑blocchi occorrono per coprire TILE_DIM
+        inner_block_num = (TILE_DIM + INNER_TILE_DIM - 1) / INNER_TILE_DIM; // numero blocchi per dimensione
 
-        // 1) Alloca la memoria contigua per la DP
+        // Alloca la memoria contigua per la DP
         size_t size = (TILE_DIM + 1) * (TILE_DIM + 1) * sizeof(int);
         if (posix_memalign((void**)&DP_data, 64, size)) {
-            perror("posix_memalign");
+            perror("Posix_memalign");
             exit(EXIT_FAILURE);
         }
 
-        // 2) Costruisci un array di puntatori per l’indicizzazione DP_matrix[i][j]
+        // Costruisci un array di puntatori per l’indicizzazione DP_matrix[i][j]
         DP_matrix = malloc((TILE_DIM + 1) * sizeof(int*));
         if (!DP_matrix) {
-            perror("alloc DP_matrix pointers");
+            perror("Alloc DP_matrix pointers");
             exit(EXIT_FAILURE);
         }
 
@@ -316,13 +308,13 @@ int main(int argc, char *argv[])
             DP_matrix[i] = DP_data + i * (TILE_DIM + 1);
         }
 
-        // 3) Inizializza la matrice a zero con first-touch
+        // Inizializza la matrice a zero con first-touch
         #pragma omp parallel for schedule(static)
         for (int i = 0; i < TILE_DIM + 1; ++i) {
             memset(DP_matrix[i], 0, (TILE_DIM + 1) * sizeof(int));
         }
     
-        // 4) Ciclo principale: ricevo un Task, lo processa con OpenMP, invio Result
+        // Ciclo principale: ricevo un Task, lo processa con OpenMP, invio Result
         Task received_task;
         MPI_Status status;
         while (1) {
@@ -333,7 +325,7 @@ int main(int argc, char *argv[])
             lcs_block_wavefront(&received_task);
         }
 
-        free(DP_data);    // libera il blocco contiguo
+        free(DP_data);
         free(DP_matrix); 
     }
 
@@ -345,7 +337,7 @@ int main(int argc, char *argv[])
         handle_PAPI_error(rc, "Error in PAPI_stop().");
     printf("Rank: %d, total L2 cache misses:%lld\n", rank, num_cache_miss);
 
-    if(!rank) {     // se sei il processo master (rank 0)
+    if(!rank) { // Se sei il processo master (rank 0)
         time_stop = PAPI_get_real_usec(); // arresta misurazione tempo
         printf("(MASTER %d on %s) (thread %lu) (PAPI) Elapsed time: %lld us\n", rank, hn, (unsigned long)pthread_self(), (time_stop - time_start));
         printf("(MASTER %d on %s) (thread %lu) (PAPI) LCS: %d\n", rank, hn, (unsigned long)pthread_self(), lcs_length);
@@ -358,24 +350,25 @@ int main(int argc, char *argv[])
     return 0;
 }
 
-void *task_producer(void *args) { // funzione di thread
+void *task_producer(void *args) { // Funzione di thread
 
-    MPI_Request send_request; // richiesta di ricezione
+    MPI_Request send_request; // Richiesta di ricezione
 
     Task task;
     int task_counter = 0; // Contatore globale per i task
 
     // OpenMP
-    for (int d = 0; d < num_antidiagonals; d++) { // per ogni diagonale
+    for (int d = 0; d < num_antidiagonals; d++) { // Per ogni diagonale
 
-        // determino intervallo di righe da considerare per l'antidiagonale corrente
-        int i_start = (d < num_blocks_cols) ? 0 : d - num_blocks_cols + 1; // 0
-        int i_end = (d < num_blocks_rows) ? d : num_blocks_rows - 1; // 1
+        // Determino intervallo di righe da considerare per l'antidiagonale corrente
+        int i_start = (d < num_blocks_cols) ? 0 : d - num_blocks_cols + 1;
+        int i_end = (d < num_blocks_rows) ? d : num_blocks_rows - 1;
 
-        for (int i = i_start; i <= i_end; i++) { // itero l'intervallo di righe da considerare 
-            int j = d - i; // siccome i + j = d 
+        for (int i = i_start; i <= i_end; i++) { // Itero l'intervallo di righe da considerare 
+            int j = d - i; // Siccome i + j = d 
 
             // Ora (i, j) è un blocco valido sulla diagonale d
+
             task.task_id[0] = i; task.task_id[1] = j; // task_id è un array di due interi (i, j) che rappresentano la posizione del blocco nella matrice
             task.start_index_sub_a = i * TILE_DIM; // Indice iniziale della porzione di stringa A da considerare
             task.start_index_sub_b = j * TILE_DIM; // Indice iniziale della porzione di stringa B da considerare
@@ -394,10 +387,10 @@ void *task_producer(void *args) { // funzione di thread
 
     MPI_Wait(&send_request, MPI_STATUS_IGNORE);
 
-    pthread_exit(NULL); // termino esplicitamente il thread corrente
+    pthread_exit(NULL); // Termino esplicitamente il thread corrente
 }
 
-void *send_sequences(void *args) { // funzione di thread 
+void *send_sequences(void *args) { // Funzione di thread 
 
     // Invio ai worker le dimensioni delle 2 sequenze
     MPI_Bcast(string_lengths, 3, MPI_INT, 0, MPI_COMM_WORLD);
@@ -406,26 +399,26 @@ void *send_sequences(void *args) { // funzione di thread
     MPI_Bcast(string_A, string_lengths[0] + 1, MPI_CHAR, 0, MPI_COMM_WORLD);
     MPI_Bcast(string_B, string_lengths[1] + 1, MPI_CHAR, 0, MPI_COMM_WORLD);
 
-    pthread_exit(NULL); // termino esplicitamente il thread corrente
+    pthread_exit(NULL); // Termino esplicitamente il thread corrente
 }
 
-void *pending_task_sender(void *args) { // funzione di thread 
+void *pending_task_sender(void *args) { // Funzione di thread 
 
     int c = 0;
 
     while(1) {
 
-        while(!pending_task_index[c]) { // finchè l'indice è zero entra
+        while(!pending_task_index[c]) { // Finchè l'indice è zero entra
             if (stop_pending_sender) {
                 goto exit;
             }
-        } // fino a quando non è stato inserito un indice valido cicla a vuoto
+        } // Fino a quando non è stato inserito un indice valido cicla a vuoto
 
-        while(!task_queue[pending_task_index[c]].initialized) { } // fino a quando il task non è inizializzato dal produttore cicla a vuoto
+        while(!task_queue[pending_task_index[c]].initialized) { } // Fino a quando il task non è inizializzato dal produttore cicla a vuoto
 
         pthread_mutex_lock(&rank_worker_mutex);  // Entra nella sezione critica
         MPI_Send(&task_queue[pending_task_index[c]], sizeof(Task), MPI_BYTE, rank_worker, TAG_TASK, MPI_COMM_WORLD);
-        rank_worker = (rank_worker == max_rank_worker) ? 1 : ++rank_worker; // incremento del rank del worker a cui inviare il messaggio
+        rank_worker = (rank_worker == max_rank_worker) ? 1 : ++rank_worker; // Incremento del rank del worker a cui inviare il messaggio
         pthread_mutex_unlock(&rank_worker_mutex); // Esce dalla sezione critica
 
         pending_task_index[c] = 0;
@@ -435,10 +428,10 @@ void *pending_task_sender(void *args) { // funzione di thread
     }
 
     exit:
-    pthread_exit(NULL); // termino esplicitamente il thread corrente
+    pthread_exit(NULL); // Termino esplicitamente il thread corrente
 }
 
-void *task_sender(void *args) { // funzione di thread 
+void *task_sender(void *args) { // Funzione di thread 
 
     Result result;
 
@@ -449,43 +442,41 @@ void *task_sender(void *args) { // funzione di thread
     int index_down;
     int index_right_down;
 
-    MPI_Status status; // Variabile per lo stato del messaggio
+    MPI_Status status;                      // Variabile per lo stato del messaggio
     MPI_Request send_requests[max_antidiagonal_length];
 
-    int count_requests = 0; // Contatore per le richieste di invio
+    int count_requests = 0;                 // Contatore per le richieste di invio
     int count_pending_task = 0;
 
     char stop_sender = 0;
 
-    while(!stop_sender) { // per ogni worker (rank > 0) while(stop_sender == false)
+    while(!stop_sender) { // Per ogni worker (rank > 0) while(stop_sender == false)
 
         MPI_Recv(&result, sizeof(Result), MPI_BYTE, MPI_ANY_SOURCE, TAG_RESULT, MPI_COMM_WORLD, &status);
 
-        i = result.task_id[0]; // recupero i valori di i e j dal task ricevuto
+        i = result.task_id[0]; // Recupero i valori di i e j dal task ricevuto
         j = result.task_id[1];
         
-        pthread_mutex_lock(&rank_worker_mutex);  // Entra nella sezione critica
-        rank_worker = status.MPI_SOURCE; // recupero il rank del worker che mi ha inviato il messaggio
+        pthread_mutex_lock(&rank_worker_mutex); // Entra nella sezione critica
+        rank_worker = status.MPI_SOURCE; // Recupero il rank del worker che mi ha inviato il messaggio
         pthread_mutex_unlock(&rank_worker_mutex); // Esce dalla sezione critica
 
+        if (j < num_blocks_cols - 1) { // Controllo se non sono l'ultima colonna (j == N - 1)
 
-        if (j < num_blocks_cols - 1) { // controllo se non sono l'ultima colonna (j == N - 1)
-
-            index_right = block_index(i, j + 1, num_blocks_rows, num_blocks_cols); // calcolo l'indice dell'array task_queue nel quale è presente il blocco a destra di quello ricevuto
+            index_right = block_index(i, j + 1, num_blocks_rows, num_blocks_cols); // Calcolo l'indice dell'array task_queue nel quale è presente il blocco a destra di quello ricevuto
             
-            memcpy(task_queue[index_right].left_col, result.right_col, sizeof(result.right_col)); // inietto dipendenza nel task
-            task_queue[index_right].left_col_ready = 1; // setto il flag a 1 (pronta)
+            memcpy(task_queue[index_right].left_col, result.right_col, sizeof(result.right_col)); // Inietto dipendenza nel task
+            task_queue[index_right].left_col_ready = 1; // Setto il flag a 1 (pronta)
 
 
             if(!i || (task_queue[index_right].top_row_ready && task_queue[index_right].angle_ready)) {
                 if(task_queue[index_right].initialized) {
 
                     pthread_mutex_lock(&rank_worker_mutex);  // Entra nella sezione critica
-                    //MPI_Send(&task_queue[index_right], sizeof(Task), MPI_BYTE, rank_worker, TAG_TASK, MPI_COMM_WORLD);
-                    rank_worker = (rank_worker == max_rank_worker) ? 1 : ++rank_worker; // incremento del rank del worker a cui inviare il messaggio
+                    rank_worker = (rank_worker == max_rank_worker) ? 1 : ++rank_worker; // Incremento del rank del worker a cui inviare il messaggio
                     MPI_Isend(&task_queue[index_right], sizeof(Task), MPI_BYTE, rank_worker, TAG_TASK, MPI_COMM_WORLD, &send_requests[count_requests]);
                     pthread_mutex_unlock(&rank_worker_mutex); // Esce dalla sezione critica
-                    count_requests = (count_requests == (max_antidiagonal_length - 1)) ? 0 : ++count_requests; // incremento del contatore delle richieste di invio
+                    count_requests = (count_requests == (max_antidiagonal_length - 1)) ? 0 : ++count_requests; // Incremento del contatore delle richieste di invio
 
                 }
                 else {
@@ -493,26 +484,23 @@ void *task_sender(void *args) { // funzione di thread
                     count_pending_task = (count_pending_task == (max_antidiagonal_length)) ? 0 : ++count_pending_task;
                 }
             }
-            
         }
     
         // Blocco sotto: (x+1, y)
-        if (i < num_blocks_rows - 1) { // controllo se non sono l'ultima riga (i == M - 1)
+        if (i < num_blocks_rows - 1) { // Controllo se non sono l'ultima riga (i == M - 1)
 
-            index_down = block_index(i + 1, j, num_blocks_rows, num_blocks_cols); // calcolo l'indice dell'array task_queue nel quale è presente il blocco sotto di quello ricevuto
+            index_down = block_index(i + 1, j, num_blocks_rows, num_blocks_cols); // Calcolo l'indice dell'array task_queue nel quale è presente il blocco sotto di quello ricevuto
             
-            memcpy(task_queue[index_down].top_row, result.bottom_row, sizeof(result.bottom_row)); // inietto dipendenza nel task
-            task_queue[index_down].top_row_ready = 1; // setto il flag a 1 (pronta)
+            memcpy(task_queue[index_down].top_row, result.bottom_row, sizeof(result.bottom_row)); // Inietto dipendenza nel task
+            task_queue[index_down].top_row_ready = 1; // Setto il flag a 1 (pronta)
 
             if(!j || (task_queue[index_down].left_col_ready && task_queue[index_down].angle_ready)) {
                 if(task_queue[index_down].initialized) {
-                    
                     pthread_mutex_lock(&rank_worker_mutex);  // Entra nella sezione critica
-                    rank_worker = (rank_worker == max_rank_worker) ? 1 : ++rank_worker; // incremento del rank del worker a cui inviare il messaggio
+                    rank_worker = (rank_worker == max_rank_worker) ? 1 : ++rank_worker; // Incremento del rank del worker a cui inviare il messaggio
                     MPI_Isend(&task_queue[index_down], sizeof(Task), MPI_BYTE, rank_worker, TAG_TASK, MPI_COMM_WORLD, &send_requests[count_requests]);
                     pthread_mutex_unlock(&rank_worker_mutex); // Esce dalla sezione critica
-                    count_requests = (count_requests == (max_antidiagonal_length - 1)) ? 0 : ++count_requests; // incremento del contatore delle richieste di invio
-
+                    count_requests = (count_requests == (max_antidiagonal_length - 1)) ? 0 : ++count_requests; // Incremento del contatore delle richieste di invio
                 }
                 else {
                     pending_task_index[count_pending_task] = index_down;
@@ -521,56 +509,92 @@ void *task_sender(void *args) { // funzione di thread
             }
         }
 
-        if(j != (num_blocks_cols - 1) && i != (num_blocks_rows - 1)) { // basta che sono o all'ultima riga o all'ultima colonna e non entro nell'if
-            
+        if(j != (num_blocks_cols - 1) && i != (num_blocks_rows - 1)) { // Basta che sono o all'ultima riga o all'ultima colonna e non entro nell'if
             index_right_down = block_index(i + 1, j + 1, num_blocks_rows, num_blocks_cols);
-
             int parent_w = MIN(TILE_DIM, string_lengths[1] - j * TILE_DIM);
-
             task_queue[index_right_down].angle = result.bottom_row[parent_w - 1];
-            task_queue[index_right_down].angle_ready = 1; // setto il flag a 1 (pronta)
+            task_queue[index_right_down].angle_ready = 1; // Setto il flag a 1 (pronta)
 
-            if(task_queue[index_right_down].left_col_ready && task_queue[index_right_down].top_row_ready) {
-                if(task_queue[index_right_down].initialized) {
-                    
-                    pthread_mutex_lock(&rank_worker_mutex);  // Entra nella sezione critica
-                    rank_worker = (rank_worker == max_rank_worker) ? 1 : ++rank_worker; // incremento del rank del worker a cui inviare il messaggio
-                    MPI_Isend(&task_queue[index_right_down], sizeof(Task), MPI_BYTE, rank_worker, TAG_TASK, MPI_COMM_WORLD, &send_requests[count_requests]);
-                    pthread_mutex_unlock(&rank_worker_mutex); // Esce dalla sezione critica
-                    count_requests = (count_requests == (max_antidiagonal_length - 1)) ? 0 : ++count_requests; // incremento del contatore delle richieste di invio
-                }
-                else {
-                    pending_task_index[count_pending_task] = index_right_down;
-                    count_pending_task = (count_pending_task == (max_antidiagonal_length)) ? 0 : ++count_pending_task;
-                }
-            }
         } else if (j == num_blocks_cols - 1 && i == num_blocks_rows - 1) {
             int W_last = string_lengths[1] - j * TILE_DIM;
             lcs_length = result.bottom_row[W_last - 1];
             stop_sender = 1;
         }
-        
+
     }
 
     stop_pending_sender = 1;
 
     Task task;
-    task.angle = -1; // invio un task con angolo -1 per terminare i worker
+    task.angle = -1; // Invio un task con angolo -1 per terminare i worker
     for (int k=1; k<=max_rank_worker; k++) {
-        MPI_Send(&task, sizeof(Task), MPI_BYTE, k, TAG_TASK, MPI_COMM_WORLD); // invio il messaggio di stop a tutti i worker
+        MPI_Send(&task, sizeof(Task), MPI_BYTE, k, TAG_TASK, MPI_COMM_WORLD); // Invio il messaggio di stop a tutti i worker
     }
 
-    pthread_exit(NULL); // termino esplicitamente il thread corrente
+    pthread_exit(NULL); // Termino esplicitamente il thread corrente
 }
 
-/* Function to handle PAPI errors. It prints the error message and exits the program. */
-void handle_PAPI_error(int rc, char *msg) {
-    char error_str[PAPI_MAX_STR_LEN];
-    memset(error_str, 0, sizeof(char)*PAPI_MAX_STR_LEN);
-  
-    fprintf(stderr, "%s\nReturn code: %d - PAPI error message:\n", msg, rc);
-    PAPI_perror(error_str); PAPI_strerror(rc);
-    exit(-1);
+void lcs_block_wavefront(Task *t) {
+
+    int i0, i1;
+    int j0, j1;
+    int up, left;
+    int gi, gj;
+    int bi, bj;
+    int i, j;
+
+    // Init bordi della tile globale DP_matrix[0..TILE_DIM][0..TILE_DIM]
+    int H = t->block_h, W = t->block_w;
+    DP_MATRIX(0,0) = t->angle;
+    for (int k = 1; k <= W; ++k)
+        DP_MATRIX(0, k) = t->top_row[k-1];
+    for (int k = 1; k <= H; ++k)
+        DP_MATRIX(k, 0) = t->left_col[k-1];
+
+    // Antidiagonali di sotto‑blocchi **solo** fino a H×W
+    int NB_h     = (H + INNER_TILE_DIM - 1) / INNER_TILE_DIM;
+    int NB_w     = (W + INNER_TILE_DIM - 1) / INNER_TILE_DIM;
+    int numSdag  = NB_h + NB_w - 1;
+
+    for (int d = 0; d < numSdag; ++d) {
+        int bi_min = MAX(0, d - (NB_w - 1));
+        int bi_max = MIN(d, NB_h - 1);
+
+        #pragma omp parallel for schedule(dynamic,1) private(i0,i1,j0,j1,up,left,gi,gj,i,j,bi)
+        for (int bi = bi_min; bi <= bi_max; ++bi) {
+            int bj = d - bi;
+            // Coordinate locali in [1..H]×[1..W]
+            int i0 = bi * INNER_TILE_DIM + 1;
+            int j0 = bj * INNER_TILE_DIM + 1;
+            int i1 = MIN((bi + 1) * INNER_TILE_DIM, H);
+            int j1 = MIN((bj + 1) * INNER_TILE_DIM, W);
+
+            for (int i = i0; i <= i1; ++i) {
+                for (int j = j0; j <= j1; ++j) {
+                    up   = DP_MATRIX(i-1, j);
+                    left = DP_MATRIX(i, j-1);
+                    gi   = t->start_index_sub_a + i - 1;
+                    gj   = t->start_index_sub_b + j - 1;
+                    DP_MATRIX(i, j) = (string_A[gi] == string_B[gj])
+                        ? DP_MATRIX(i-1, j-1) + 1
+                        : MAX(up, left);
+                }
+            }
+       } // Implicit barrier di OpenMP
+    }
+
+    // Il thread master MPI prepara e invia il risultato del tile
+    Result res;
+    res.task_id[0] = t->task_id[0];
+    res.task_id[1] = t->task_id[1];
+
+    // Send only the actual borders of this tile
+    for (int i = 1; i <= H; ++i)
+        res.right_col[i-1] = DP_MATRIX(i, W);
+    for (int j = 1; j <= W; ++j)
+        res.bottom_row[j-1] = DP_MATRIX(H, j);
+    
+    MPI_Send(&res, sizeof(res), MPI_BYTE, 0, TAG_RESULT, MPI_COMM_WORLD);
 }
 
 // Calcola la lunghezza dell'antidiagonale d in una matrice MxN
@@ -592,80 +616,21 @@ int sum_of_lengths(int d, int M, int N) {
     return sum;
 }
 
-// Calcola l'indice del blocco (x,y) nell'array 
-// memorizzato per antidiagonali in una matrice MxN.
+// Calcola l'indice del blocco (x,y) nell'array (memorizzato per antidiagonali in una matrice MxN)
 int block_index(int x, int y, int M, int N) {
     int d = x + y;
-    int before = sum_of_lengths(d, M, N);        // blocchi nelle antidiagonali precedenti
-    int r_start = MAX(0, d - (N - 1));            // riga iniziale valida per la diagonale d
-    int offset = x - r_start;                     // offset all'interno della diagonale
+    int before = sum_of_lengths(d, M, N); // Blocchi nelle antidiagonali precedenti
+    int r_start = MAX(0, d - (N - 1)); //Riga iniziale valida per la diagonale d
+    int offset = x - r_start; // Offset all'interno della diagonale
     return before + offset;
 }
 
-// DP_matrix è int** di dimensione (TILE_DIM+1)x(TILE_DIM+1), globale al worker
-// string_A, string_B sono i vettori di caratteri globali
-// offset_A, offset_B sono già impostati
-
-void lcs_block_wavefront(Task *t) {
-
-    int i0, i1;
-    int j0, j1;
-    int up, left;
-    int gi, gj;
-    int bi, bj;
-    int i, j;
-
-    // 1) init bordi della tile globale DP_matrix[0..TILE_DIM][0..TILE_DIM]
-    int H = t->block_h, W = t->block_w;
-    DP_MATRIX(0,0) = t->angle;
-    for (int k = 1; k <= W; ++k)
-        DP_MATRIX(0, k) = t->top_row[k-1];
-    for (int k = 1; k <= H; ++k)
-        DP_MATRIX(k, 0) = t->left_col[k-1];
-
-    // 3) antidiagonali di sotto‑blocchi **solo** fino a H×W
-    int NB_h     = (H + INNER_TILE_DIM - 1) / INNER_TILE_DIM;
-    int NB_w     = (W + INNER_TILE_DIM - 1) / INNER_TILE_DIM;
-    int numSdag  = NB_h + NB_w - 1;
-
-    for (int d = 0; d < numSdag; ++d) {
-        int bi_min = MAX(0, d - (NB_w - 1));
-        int bi_max = MIN(d, NB_h - 1);
-
-        #pragma omp parallel for schedule(dynamic,1) private(i0,i1,j0,j1,up,left,gi,gj,i,j,bi)
-        for (int bi = bi_min; bi <= bi_max; ++bi) {
-            int bj = d - bi;
-            // coordinate locali in [1..H]×[1..W]
-            int i0 = bi * INNER_TILE_DIM + 1;
-            int j0 = bj * INNER_TILE_DIM + 1;
-            int i1 = MIN((bi + 1) * INNER_TILE_DIM, H);
-            int j1 = MIN((bj + 1) * INNER_TILE_DIM, W);
-
-            for (int i = i0; i <= i1; ++i) {
-                for (int j = j0; j <= j1; ++j) {
-                    up   = DP_MATRIX(i-1, j);
-                    left = DP_MATRIX(i, j-1);
-                    gi   = t->start_index_sub_a + i - 1;
-                    gj   = t->start_index_sub_b + j - 1;
-                    DP_MATRIX(i, j) = (string_A[gi] == string_B[gj])
-                        ? DP_MATRIX(i-1, j-1) + 1
-                        : MAX(up, left);
-                }
-            }
-       }
-        // implicit barrier di OpenMP
-    }
-
-    // 4) il thread master MPI prepara e invia il risultato del tile
-    Result res;
-    res.task_id[0] = t->task_id[0];
-    res.task_id[1] = t->task_id[1];
-
-    // send only the actual borders of this tile
-    for (int i = 1; i <= H; ++i)
-        res.right_col[i-1] = DP_MATRIX(i, W);
-    for (int j = 1; j <= W; ++j)
-        res.bottom_row[j-1] = DP_MATRIX(H, j);
-    
-    MPI_Send(&res, sizeof(res), MPI_BYTE, 0, TAG_RESULT, MPI_COMM_WORLD);
+// Function to handle PAPI errors. It prints the error message and exits the program.
+void handle_PAPI_error(int rc, char *msg) {
+    char error_str[PAPI_MAX_STR_LEN];
+    memset(error_str, 0, sizeof(char)*PAPI_MAX_STR_LEN);
+  
+    fprintf(stderr, "%s\nReturn code: %d - PAPI error message:\n", msg, rc);
+    PAPI_perror(error_str); PAPI_strerror(rc);
+    exit(EXIT_FAILURE);
 }
