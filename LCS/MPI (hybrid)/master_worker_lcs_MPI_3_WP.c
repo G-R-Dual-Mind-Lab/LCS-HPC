@@ -293,16 +293,18 @@ int main(int argc, char *argv[])
         MPI_Bcast(string_B, string_lengths[1] + 1, MPI_CHAR, 0, MPI_COMM_WORLD); // len_B
         MPI_Bcast(alphabet, string_lengths[2] + 1, MPI_CHAR, 0, MPI_COMM_WORLD); // len_C printf("(WORKER %d on %s) (thread %lu) Ho ricevuto le 3 stringhe.\n", rank, hn, (unsigned long)pthread_self());
 
+        int **DP_matrix;
+        
         // Alloco memoria per la matrice DP
         DP_matrix = malloc((TILE_DIM + 1) * sizeof(int *));
-        if (DP_matrix == NULL) {
-            fprintf(stderr, "Errore: allocazione della matrice delle righe fallita!\n");
+        if (!DP_matrix) {
+            perror("Alloc DP_matrix pointers");
             exit(EXIT_FAILURE);
         }
         for (int i = 0; i <= TILE_DIM; i++) {
             DP_matrix[i] = calloc(TILE_DIM + 1, sizeof(int));
-            if (DP_matrix[i] == NULL) {
-                fprintf(stderr, "Errore: allocazione della riga %d fallita!\n", i);
+            if (!DP_matrix[i]) {
+                perror("Alloc DP_matrix[*] pointers");
                 exit(EXIT_FAILURE);
             }
         }

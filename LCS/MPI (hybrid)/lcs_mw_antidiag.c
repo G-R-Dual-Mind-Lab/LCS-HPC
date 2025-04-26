@@ -324,7 +324,7 @@ int main(int argc, char *argv[])
                 break;
             lcs_block_wavefront(&received_task);
         }
-
+        
         free(DP_data);
         free(DP_matrix); 
     }
@@ -543,44 +543,76 @@ void lcs_block_wavefront(Task *t) {
     int bi, bj;
     int i, j;
 
-    // Init bordi della tile globale DP_matrix[0..TILE_DIM][0..TILE_DIM]
-    int H = t->block_h, W = t->block_w;
+    // Tile dimensione tile_height * tile_width
+    int tile_height = t->block_h; // altezza del tile ricevuto
+    int tile_width = t->block_w; // larghezza del tile ricevuto
+
     DP_MATRIX(0,0) = t->angle;
-    for (int k = 1; k <= W; ++k)
+    for (int k = 1; k <= tile_width; ++k)
         DP_MATRIX(0, k) = t->top_row[k-1];
-    for (int k = 1; k <= H; ++k)
+    for (int k = 1; k <= tile_height; ++k)
         DP_MATRIX(k, 0) = t->left_col[k-1];
 
-    // Antidiagonali di sotto‑blocchi **solo** fino a H×W
-    int NB_h     = (H + INNER_TILE_DIM - 1) / INNER_TILE_DIM;
-    int NB_w     = (W + INNER_TILE_DIM - 1) / INNER_TILE_DIM;
-    int numSdag  = NB_h + NB_w - 1;
+    // Il tile di dimensione tile_height×tile_width viene ulteriormente diviso in blocchi di lato INNER_TILE_DIM
+    int block_count_vertical = (tile_height + INNER_TILE_DIM - 1) / INNER_TILE_DIM; // Numero di blocchi in altezza rispetto al tile ricevuto
+    int block_count_horizontal = (tile_width + INNER_TILE_DIM - 1) / INNER_TILE_DIM; // Numero di blocchi in larghezza rispetto al tile ricevuto
+    int antidiagonal_count = block_count_vertical + block_count_horizontal - 1; //Quante antidiagonali ha il blocco che dobbiamo calcolare ed stato diviso ulteriormente in blocchi
 
-    for (int d = 0; d < numSdag; ++d) {
-        int bi_min = MAX(0, d - (NB_w - 1));
-        int bi_max = MIN(d, NB_h - 1);
+    for (int d = 0; d < antidiagonal_count; ++d) { // Itero le antidiagonali di blocchi
 
-        #pragma omp parallel for schedule(dynamic,1) private(i0,i1,j0,j1,up,left,gi,gj,i,j,bi)
-        for (int bi = bi_min; bi <= bi_max; ++bi) {
+        // Per ciascuna antidiagonale d si calcolano i blocchi (bi,bj) che giacciono su quella antidiagonale di blocchi
+
+        /*
+        *Calcolo, per la antidiagonale di blocchi “d”, quali sono i limiti inferiori e superiori dell’indice di riga del blocco (bi)
+        */ 
+        int min_row_index = MAX(0, d - (block_count_horizontal - 1));
+        int max_row_index = MIN(d, block_count_vertical - 1);
+
+        /*
+         * Inizio della regione parallela OpenMP:
+         * - Per il blocco (0,0) ci sarà un solo thread, min_row_index = max_row_index = 0
+        */
+        //omp_set_num_threads(NUM_WORKER_THREADS); // Setto il numero di thread da usare
+        #pragma omp parallel for schedule(dynamic, 1) private(i0, i1, j0, j1, up, left, gi, gj, i, j, bi)
+        for (int bi = min_row_index; bi <= max_row_index; ++bi) { // Itero le righe dell'antidiagonale 
             int bj = d - bi;
-            // Coordinate locali in [1..H]×[1..W]
-            int i0 = bi * INNER_TILE_DIM + 1;
-            int j0 = bj * INNER_TILE_DIM + 1;
-            int i1 = MIN((bi + 1) * INNER_TILE_DIM, H);
-            int j1 = MIN((bj + 1) * INNER_TILE_DIM, W);
+            
+            // Blocco (0, 1) -> bi = 0, bj = d - 0 = 1 - 0 = 1
 
-            for (int i = i0; i <= i1; ++i) {
-                for (int j = j0; j <= j1; ++j) {
+            // Coordinate locali in [1..tile_height]×[1..tile_width]
+            int i0 = bi * INNER_TILE_DIM + 1; // Indice di riga inziiale
+            int i1 = MIN((bi + 1) * INNER_TILE_DIM, tile_height); // Indice di riga finale
+
+            int j0 = bj * INNER_TILE_DIM + 1; // Indice di colonna iniziale
+            int j1 = MIN((bj + 1) * INNER_TILE_DIM, tile_width); // Indice di colonna finale
+
+            //          j0                        j1
+            //          |                         |
+            //          v                         v
+            // i0 ->   +-----------------------------+   
+            //         |                             |   
+            //         |                             |   
+            //         |        TILE BLOCK           |   --> dimensione: INNER_TILE_DIM × INNER_TILE_DIM
+            //         |                             |   
+            //         |                             |   
+            // i1 ->   +-----------------------------+
+            //
+            //         ^                             ^
+            //         |                             |
+            //    bi * INNER_TILE_DIM        MIN((bi+1)*INNER_TILE_DIM, tile_height)
+
+            for (int i = i0; i <= i1; ++i) { // Itero le righe del blochetto interno (INNER_TILE_DIM)
+                for (int j = j0; j <= j1; ++j) { // Itero le colonne del blochetto interno (INNER_TILE_DIM)
                     up   = DP_MATRIX(i-1, j);
                     left = DP_MATRIX(i, j-1);
-                    gi   = t->start_index_sub_a + i - 1;
-                    gj   = t->start_index_sub_b + j - 1;
-                    DP_MATRIX(i, j) = (string_A[gi] == string_B[gj])
-                        ? DP_MATRIX(i-1, j-1) + 1
-                        : MAX(up, left);
+                    gi   = t->start_index_sub_a + i - 1; // Indice della stringa A da considerare
+                    gj   = t->start_index_sub_b + j - 1; // Indice della stringa B da considerare
+                    DP_MATRIX(i, j) = (string_A[gi] == string_B[gj]) // Se string_A[*] == string_B[*] allora
+                        ? DP_MATRIX(i-1, j-1) + 1 // Caso in cui sono uguali (diagonale + 1)
+                        : MAX(up, left); // Altrimenti prendo il massimo tra su e sinistra (max(up, left))
                 }
             }
-       } // Implicit barrier di OpenMP
+       } // Barriera implicita di OpenMP
     }
 
     // Il thread master MPI prepara e invia il risultato del tile
@@ -589,10 +621,10 @@ void lcs_block_wavefront(Task *t) {
     res.task_id[1] = t->task_id[1];
 
     // Send only the actual borders of this tile
-    for (int i = 1; i <= H; ++i)
-        res.right_col[i-1] = DP_MATRIX(i, W);
-    for (int j = 1; j <= W; ++j)
-        res.bottom_row[j-1] = DP_MATRIX(H, j);
+    for (int i = 1; i <= tile_height; ++i)
+        res.right_col[i-1] = DP_MATRIX(i, tile_width);
+    for (int j = 1; j <= tile_width; ++j)
+        res.bottom_row[j-1] = DP_MATRIX(tile_height, j);
     
     MPI_Send(&res, sizeof(res), MPI_BYTE, 0, TAG_RESULT, MPI_COMM_WORLD);
 }

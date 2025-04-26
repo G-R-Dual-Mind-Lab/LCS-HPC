@@ -5,7 +5,7 @@
 #include <limits.h>
 #include <papi.h>
 
-#define NUM_THREADS 8
+#define NUM_THREADS 16
 
 // Global variables di input
 int len_A, len_B;
@@ -17,7 +17,7 @@ int max_diag;  // = min(len_A, len_B) + 1
 // I tre buffer per le diagonali (diagonale d-2, d-1 e quella corrente)
 int *diag_prev2;   // diagonal due indietro
 int *diag_prev1;   // diagonal precedente
-int *diag_cur; // diagonal corrente
+int *diag_curr; // diagonal corrente
 int *diagonals;
 
 // Barriera per sincronizzare i thread
@@ -31,6 +31,9 @@ pthread_barrier_t barrier;
 //
 void *lcs_thread_func(void *arg) {
     int id = *(int *)arg, i_min, i_max, count, A_prev, count_prev, A_prev2, count_prev2, i_max_prev, i_max_prev2, chunk, rem, start, end, top, left, diag_val, pos_top, pos_left, pos, i, j;
+
+    int EventSet = PAPI_NULL;
+    long long countCacheMiss[3] = {0};
 
     for (int d = 2; d <= len_A + len_B; d++) {
 
@@ -71,9 +74,9 @@ void *lcs_thread_func(void *arg) {
             if (str_A[i - 1] == str_B[j - 1]) {
                 if (d >= 4) {
                     pos = (i - 1) - A_prev2;
-                    diag_cur[k] = (pos >= 0 && pos < count_prev2) ? (diag_prev2[pos] + 1) : 1;
+                    diag_curr[k] = (pos >= 0 && pos < count_prev2) ? (diag_prev2[pos] + 1) : 1;
                 } else {
-                    diag_cur[k] = 1;
+                    diag_curr[k] = 1;
                 }
             } else {
                 top = 0, left = 0;
@@ -85,7 +88,7 @@ void *lcs_thread_func(void *arg) {
                     if (pos_left >= 0 && pos_left < count_prev)
                         left = diag_prev1[pos_left];
                 }
-                diag_cur[k] = MAX(top, left);
+                diag_curr[k] = MAX(top, left);
             }
         }
 
@@ -94,8 +97,8 @@ void *lcs_thread_func(void *arg) {
         if (id == 0) {
             int *temp = diag_prev2;
             diag_prev2 = diag_prev1;
-            diag_prev1 = diag_cur;
-            diag_cur = temp;
+            diag_prev1 = diag_curr;
+            diag_curr = temp;
         }
 
         pthread_barrier_wait(&barrier);
@@ -157,13 +160,13 @@ int main(int argc, char *argv[]) {
 
     max_diag = (len_A < len_B ? len_A : len_B) + 1;
 
-    diagonals = calloc((max_diag*3), sizeof(int));
+    diagonals = calloc((max_diag * 3), sizeof(int));
 
-    diag_prev2 = &diagonals[max_diag*2];
+    diag_prev2 = &diagonals[max_diag * 2];
     diag_prev1 = &diagonals[max_diag];
-    diag_cur = &diagonals[0];
+    diag_curr = &diagonals[0];
 
-    if(diag_prev2 == NULL || diag_prev1 == NULL || diag_cur == NULL){
+    if(diag_prev2 == NULL || diag_prev1 == NULL || diag_curr == NULL){
         printf("Error: Memory allocation failed for diagonals.\n");
         return 1;
     }
@@ -179,19 +182,17 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
+    long long papi_time_start = PAPI_get_real_usec();
+
     pthread_t *threads = malloc(NUM_THREADS * sizeof(pthread_t));
     int thread_ids[NUM_THREADS];
     for (int i = 0; i < NUM_THREADS; i++){
         thread_ids[i] = i;
         if(pthread_create(&threads[i], NULL, lcs_thread_func, &thread_ids[i]) != 0){
-
-
             fprintf(stderr, "Error creating thread %d.\n", i);
             exit(EXIT_FAILURE);
         }
     }
-
-    long long papi_time_start = PAPI_get_real_usec();
 
     for (int i = 0; i < NUM_THREADS; i++){
         pthread_join(threads[i], NULL);
@@ -203,7 +204,7 @@ int main(int argc, char *argv[]) {
     int d_final = len_A + len_B;
     int i_min_final = (d_final - len_B > 1) ? d_final - len_B : 1;
     int k = len_A - i_min_final;  // offset nella diagonale finale
-    int LCS_length = diag_prev1[k];
+    int LCS_length = diag_prev2[k];  // era diag_prev1[k], ma dopo lo swap l'ultima è in diag_prev2
 
     printf("Length of LCS is: %d\n", LCS_length);
     printf("Number of threads: %d\n", NUM_THREADS);
