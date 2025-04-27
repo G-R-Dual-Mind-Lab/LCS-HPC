@@ -8,7 +8,7 @@
 #include "omp.h"
 
 #define NUM_WORKER_THREADS 8                // Numero di thread
-#define INNER_TILE_DIM 125                  // dimensione del sotto‑blocco
+#define INNER_TILE_DIM 100                  // dimensione del sotto‑blocco
 #define TILE_DIM 5000                       // Dimensione della tile (blocco)
 #define HOST_BUFF 256                       // Dimensione del buffer per il nome host
 #define TAG_TASK 0                          // Tag dei messaggi di tipo "invio task"
@@ -287,15 +287,8 @@ int main(int argc, char *argv[])
         MPI_Bcast(string_A, string_lengths[0] + 1, MPI_CHAR, 0, MPI_COMM_WORLD);
         MPI_Bcast(string_B, string_lengths[1] + 1, MPI_CHAR, 0, MPI_COMM_WORLD);
 
-        // Calcolo quanti sotto‑blocchi occorrono per coprire TILE_DIM
-        inner_block_num = (TILE_DIM + INNER_TILE_DIM - 1) / INNER_TILE_DIM; // numero blocchi per dimensione
-
-        // Alloca la memoria contigua per la DP
-        size_t size = (TILE_DIM + 1) * (TILE_DIM + 1) * sizeof(int);
-        if (posix_memalign((void**)&DP_data, 64, size)) {
-            perror("Posix_memalign");
-            exit(EXIT_FAILURE);
-        }
+        // Alloco memoria per la matrice DP (dimensione TILE_DIM+1 x TILE_DIM+1)
+        DP_data  = malloc((TILE_DIM + 1) * (TILE_DIM + 1) * sizeof(int)); 
 
         // Costruisci un array di puntatori per l’indicizzazione DP_matrix[i][j]
         DP_matrix = malloc((TILE_DIM + 1) * sizeof(int*));
@@ -313,6 +306,13 @@ int main(int argc, char *argv[])
         for (int i = 0; i < TILE_DIM + 1; ++i) {
             memset(DP_matrix[i], 0, (TILE_DIM + 1) * sizeof(int));
         }
+
+        /*DP_matrix = malloc((TILE_DIM + 1) * sizeof(int *));
+        #pragma omp parallel for schedule(static)
+        for(int k=0; k<(TILE_DIM + 1); k++)
+        {
+            DP_matrix[k] = malloc((TILE_DIM + 1) * sizeof(int));
+        }*/
     
         // Ciclo principale: ricevo un Task, lo processa con OpenMP, invio Result
         Task received_task;
@@ -573,9 +573,13 @@ void lcs_block_wavefront(Task *t) {
          * - Per il blocco (0,0) ci sarà un solo thread, min_row_index = max_row_index = 0
         */
         //omp_set_num_threads(NUM_WORKER_THREADS); // Setto il numero di thread da usare
-        #pragma omp parallel for schedule(dynamic, 1) private(i0, i1, j0, j1, up, left, gi, gj, i, j, bi)
+        #pragma omp parallel for schedule(dynamic, 1) private(i0, i1, j0, j1, up, left, gi, gj, i, j, bi) 
         for (int bi = min_row_index; bi <= max_row_index; ++bi) { // Itero le righe dell'antidiagonale 
             int bj = d - bi;
+
+            /*if(bi==0 && bj==0) { // Se sono il blocco (0, 0) allora non faccio nulla
+                printf("WORKER %d (thread %lu) n threads = %d\n", rank, (unsigned long)pthread_self(), omp_get_num_threads());
+            }*/
             
             // Blocco (0, 1) -> bi = 0, bj = d - 0 = 1 - 0 = 1
 

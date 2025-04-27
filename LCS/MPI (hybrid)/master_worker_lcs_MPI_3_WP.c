@@ -479,8 +479,8 @@ void *task_sender(void *args) { // funzione di thread
 
                     pthread_mutex_lock(&rank_worker_mutex);  // Entra nella sezione critica
                     //MPI_Send(&task_queue[index_right], sizeof(Task), MPI_BYTE, rank_worker, TAG_TASK, MPI_COMM_WORLD);
-                    MPI_Isend(&task_queue[index_right], sizeof(Task), MPI_BYTE, rank_worker, TAG_TASK, MPI_COMM_WORLD, &send_requests[count_requests]);
                     rank_worker = (rank_worker == max_rank_worker) ? 1 : ++rank_worker; // incremento del rank del worker a cui inviare il messaggio
+                    MPI_Isend(&task_queue[index_right], sizeof(Task), MPI_BYTE, rank_worker, TAG_TASK, MPI_COMM_WORLD, &send_requests[count_requests]);
                     pthread_mutex_unlock(&rank_worker_mutex); // Esce dalla sezione critica
                     count_requests = (count_requests == (max_antidiagonal_length - 1)) ? 0 : ++count_requests; // incremento del contatore delle richieste di invio
 
@@ -505,8 +505,8 @@ void *task_sender(void *args) { // funzione di thread
                 if(task_queue[index_down].initialized) {
                     
                     pthread_mutex_lock(&rank_worker_mutex);  // Entra nella sezione critica
-                    MPI_Isend(&task_queue[index_down], sizeof(Task), MPI_BYTE, rank_worker, TAG_TASK, MPI_COMM_WORLD, &send_requests[count_requests]);
                     rank_worker = (rank_worker == max_rank_worker) ? 1 : ++rank_worker; // incremento del rank del worker a cui inviare il messaggio
+                    MPI_Isend(&task_queue[index_down], sizeof(Task), MPI_BYTE, rank_worker, TAG_TASK, MPI_COMM_WORLD, &send_requests[count_requests]);
                     pthread_mutex_unlock(&rank_worker_mutex); // Esce dalla sezione critica
                     count_requests = (count_requests == (max_antidiagonal_length - 1)) ? 0 : ++count_requests; // incremento del contatore delle richieste di invio
 
@@ -529,8 +529,8 @@ void *task_sender(void *args) { // funzione di thread
                 if(task_queue[index_right_down].initialized) {
                     
                     pthread_mutex_lock(&rank_worker_mutex);  // Entra nella sezione critica
-                    MPI_Isend(&task_queue[index_right_down], sizeof(Task), MPI_BYTE, rank_worker, TAG_TASK, MPI_COMM_WORLD, &send_requests[count_requests]);
                     rank_worker = (rank_worker == max_rank_worker) ? 1 : ++rank_worker; // incremento del rank del worker a cui inviare il messaggio
+                    MPI_Isend(&task_queue[index_right_down], sizeof(Task), MPI_BYTE, rank_worker, TAG_TASK, MPI_COMM_WORLD, &send_requests[count_requests]);
                     pthread_mutex_unlock(&rank_worker_mutex); // Esce dalla sezione critica
                     count_requests = (count_requests == (max_antidiagonal_length - 1)) ? 0 : ++count_requests; // incremento del contatore delle richieste di invio
                 }
