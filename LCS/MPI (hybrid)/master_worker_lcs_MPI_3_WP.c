@@ -293,16 +293,18 @@ int main(int argc, char *argv[])
         MPI_Bcast(string_B, string_lengths[1] + 1, MPI_CHAR, 0, MPI_COMM_WORLD); // len_B
         MPI_Bcast(alphabet, string_lengths[2] + 1, MPI_CHAR, 0, MPI_COMM_WORLD); // len_C printf("(WORKER %d on %s) (thread %lu) Ho ricevuto le 3 stringhe.\n", rank, hn, (unsigned long)pthread_self());
 
+        int **DP_matrix;
+        
         // Alloco memoria per la matrice DP
         DP_matrix = malloc((TILE_DIM + 1) * sizeof(int *));
-        if (DP_matrix == NULL) {
-            fprintf(stderr, "Errore: allocazione della matrice delle righe fallita!\n");
+        if (!DP_matrix) {
+            perror("Alloc DP_matrix pointers");
             exit(EXIT_FAILURE);
         }
         for (int i = 0; i <= TILE_DIM; i++) {
             DP_matrix[i] = calloc(TILE_DIM + 1, sizeof(int));
-            if (DP_matrix[i] == NULL) {
-                fprintf(stderr, "Errore: allocazione della riga %d fallita!\n", i);
+            if (!DP_matrix[i]) {
+                perror("Alloc DP_matrix[*] pointers");
                 exit(EXIT_FAILURE);
             }
         }
@@ -477,8 +479,8 @@ void *task_sender(void *args) { // funzione di thread
 
                     pthread_mutex_lock(&rank_worker_mutex);  // Entra nella sezione critica
                     //MPI_Send(&task_queue[index_right], sizeof(Task), MPI_BYTE, rank_worker, TAG_TASK, MPI_COMM_WORLD);
-                    MPI_Isend(&task_queue[index_right], sizeof(Task), MPI_BYTE, rank_worker, TAG_TASK, MPI_COMM_WORLD, &send_requests[count_requests]);
                     rank_worker = (rank_worker == max_rank_worker) ? 1 : ++rank_worker; // incremento del rank del worker a cui inviare il messaggio
+                    MPI_Isend(&task_queue[index_right], sizeof(Task), MPI_BYTE, rank_worker, TAG_TASK, MPI_COMM_WORLD, &send_requests[count_requests]);
                     pthread_mutex_unlock(&rank_worker_mutex); // Esce dalla sezione critica
                     count_requests = (count_requests == (max_antidiagonal_length - 1)) ? 0 : ++count_requests; // incremento del contatore delle richieste di invio
 
@@ -503,8 +505,8 @@ void *task_sender(void *args) { // funzione di thread
                 if(task_queue[index_down].initialized) {
                     
                     pthread_mutex_lock(&rank_worker_mutex);  // Entra nella sezione critica
-                    MPI_Isend(&task_queue[index_down], sizeof(Task), MPI_BYTE, rank_worker, TAG_TASK, MPI_COMM_WORLD, &send_requests[count_requests]);
                     rank_worker = (rank_worker == max_rank_worker) ? 1 : ++rank_worker; // incremento del rank del worker a cui inviare il messaggio
+                    MPI_Isend(&task_queue[index_down], sizeof(Task), MPI_BYTE, rank_worker, TAG_TASK, MPI_COMM_WORLD, &send_requests[count_requests]);
                     pthread_mutex_unlock(&rank_worker_mutex); // Esce dalla sezione critica
                     count_requests = (count_requests == (max_antidiagonal_length - 1)) ? 0 : ++count_requests; // incremento del contatore delle richieste di invio
 
@@ -527,8 +529,8 @@ void *task_sender(void *args) { // funzione di thread
                 if(task_queue[index_right_down].initialized) {
                     
                     pthread_mutex_lock(&rank_worker_mutex);  // Entra nella sezione critica
-                    MPI_Isend(&task_queue[index_right_down], sizeof(Task), MPI_BYTE, rank_worker, TAG_TASK, MPI_COMM_WORLD, &send_requests[count_requests]);
                     rank_worker = (rank_worker == max_rank_worker) ? 1 : ++rank_worker; // incremento del rank del worker a cui inviare il messaggio
+                    MPI_Isend(&task_queue[index_right_down], sizeof(Task), MPI_BYTE, rank_worker, TAG_TASK, MPI_COMM_WORLD, &send_requests[count_requests]);
                     pthread_mutex_unlock(&rank_worker_mutex); // Esce dalla sezione critica
                     count_requests = (count_requests == (max_antidiagonal_length - 1)) ? 0 : ++count_requests; // incremento del contatore delle richieste di invio
                 }
