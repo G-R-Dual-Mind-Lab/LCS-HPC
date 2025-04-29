@@ -6,7 +6,7 @@
 #include <papi.h>
 #include "omp.h"
 
-#define NUM_WORKER_THREADS 8        // Number of threads to use in each worker (uncomment row XX to use this value)
+#define NUM_WORKER_THREADS 8        // Number of threads to use in each worker (uncomment row 763 to use this value)
 #define TILE_DIM 5000               // Size of the block (tile) into which the DP matrix is divided
 #define INNER_TILE_DIM 100          // Size of inner block (sub-tile) into which each tile received by each worker is divided
 
