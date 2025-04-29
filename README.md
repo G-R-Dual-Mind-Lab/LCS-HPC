@@ -44,4 +44,4 @@ This repository provides three different implementations of the LCS algorithm:
 ## Presentation
 
 For a detailed explanation of the implementation, design choices, execution times, and performance analysis, see the public Canva presentation:  
-[Canva Presentation Link]([https://www.canva.com/your-presentation-link](https://www.canva.com/design/DAGjrn1ybhU/EdsVYw9A2izzAkTIfvtmFg/view?utm_content=DAGjrn1ybhU&utm_campaign=designshare&utm_medium=link2&utm_source=uniquelinks&utlId=hf0942c3e2a)
+[Canva Presentation Link](https://www.canva.com/design/DAGjrn1ybhU/EdsVYw9A2izzAkTIfvtmFg/view?utm_content=DAGjrn1ybhU&utm_campaign=designshare&utm_medium=link2&utm_source=uniquelinks&utlId=hf0942c3e2a)
